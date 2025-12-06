@@ -1,0 +1,930 @@
+/**
+ * 课时记 (Class Recorder) - v10.0 白色主题 & 弹窗日历版
+ * * 更新日志:
+ * 1. [UI] 全局背景改为白色 (#FFFFFF)，文字适配深色，状态栏适配黑色图标。
+ * 2. [组件] 移除嵌入式 CalendarPicker，改为 DatePickerDialog (官方文档示例1)。
+ * 3. [交互] 点击顶部日期区域弹出日历选择器进行筛选。
+ */
+
+import promptAction from '@ohos.promptAction';
+import window from '@ohos.window';
+import fs from '@ohos.file.fs';
+import picker from '@ohos.file.picker';
+import common from '@ohos.app.ability.common';
+import { BusinessError } from '@ohos.base';
+import curves from '@ohos.curves';
+
+// --- 0. 全局工具函数 ---
+
+function formatDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = (date.getMonth() + 1).toString().padStart(2, '0');
+  const d = date.getDate().toString().padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function getDaysInMonth(date: Date): (Date | null)[] {
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const firstDayIndex = new Date(year, month, 1).getDay();
+  const days: (Date | null)[] = [];
+  for (let i = 0; i < firstDayIndex; i++) days.push(null);
+  for (let i = 1; i <= daysInMonth; i++) days.push(new Date(year, month, i));
+  return days;
+}
+
+// --- 1. 数据模型定义 ---
+
+@Observed
+class TodoTask {
+  id: number;
+  content: string;
+  isCompleted: boolean;
+  createdAt: number;
+  dateStr: string;
+
+  constructor(content: string, dateStr: string) {
+    this.id = Date.now() + Math.random();
+    this.content = content;
+    this.isCompleted = false;
+    this.createdAt = Date.now();
+    this.dateStr = dateStr;
+  }
+}
+
+class Student {
+  id: number = 0;
+  name: string = '';
+  totalHours: number = 0;
+  remainingHours: number = 0;
+  paymentDate: string = '';
+  note: string = '';
+  paymentAmount: number = 0;
+
+  constructor(name: string, totalHours: number, note: string, paymentAmount: number = 0) {
+    this.id = Date.now();
+    this.name = name;
+    this.totalHours = totalHours;
+    this.remainingHours = totalHours;
+    this.paymentDate = new Date().toISOString().split('T')[0];
+    this.note = note;
+    this.paymentAmount = paymentAmount;
+  }
+}
+
+class CalendarEvent {
+  id: number = 0;
+  date: string = '';
+  type: 'class' | 'inspiration' = 'class';
+  studentId: number | null = null;
+  content: string = '';
+  time: string = '';
+  status: 'scheduled' | 'completed' = 'scheduled';
+
+  constructor(type: 'class' | 'inspiration', date: string) {
+    this.id = Date.now() + Math.random();
+    this.type = type;
+    this.date = date;
+  }
+}
+
+class EventGroup {
+  id: string;
+  time: string;
+  type: 'class' | 'inspiration';
+  events: CalendarEvent[];
+
+  constructor(time: string, type: 'class' | 'inspiration', events: CalendarEvent[]) {
+    this.time = time;
+    this.type = type;
+    this.events = events;
+    this.id = type + '_' + time + '_' + (events.length > 0 ? events[0].id : '0');
+  }
+}
+
+PersistentStorage.PersistProp('students_data', []);
+PersistentStorage.PersistProp('events_data', []);
+PersistentStorage.PersistProp('todo_data', []);
+
+// --- 2. 业务逻辑 ---
+
+class DataExporter {
+  static async exportStudentData(student: Student, events: CalendarEvent[]) {
+    try {
+      const studentEvents = events.filter(e => e.studentId === student.id && e.type === 'class');
+      const completedCount = student.totalHours - student.remainingHours;
+
+      let content = '\uFEFF';
+      content += `学生数据导出报表\n`;
+      content += `生成日期,${new Date().toLocaleDateString()}\n\n`;
+      content += `[基本信息]\n`;
+      content += `姓名,${student.name}\n`;
+      content += `缴费日期,${student.paymentDate}\n`;
+      content += `缴费金额,${student.paymentAmount}\n`;
+      content += `总课时,${student.totalHours}\n`;
+      content += `剩余课时,${student.remainingHours}\n`;
+      content += `已上课时,${completedCount}\n`;
+      content += `备注,${student.note}\n\n`;
+      content += `[上课记录明细]\n`;
+      content += `日期,时间,状态,类型\n`;
+
+      studentEvents.sort((a, b) => a.date.localeCompare(b.date));
+
+      studentEvents.forEach(ev => {
+        const statusStr = ev.status === 'completed' ? '已完成' : '待上课';
+        content += `${ev.date},${ev.time},${statusStr},一对一课程\n`;
+      });
+
+      const saveOptions = new picker.DocumentSaveOptions();
+      saveOptions.newFileNames = [`${student.name}_课时数据.csv`];
+      const documentViewPicker = new picker.DocumentViewPicker();
+      const documentSaveResult = await documentViewPicker.save(saveOptions);
+
+      if (documentSaveResult && documentSaveResult.length > 0) {
+        const uri = documentSaveResult[0];
+        const file = fs.openSync(uri, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE);
+        fs.writeSync(file.fd, content);
+        fs.closeSync(file);
+        promptAction.showToast({ message: '导出成功，请在文件管理器查看' });
+      }
+    } catch (err) {
+      console.error('Export failed:', err);
+      promptAction.showToast({ message: '导出失败: ' + JSON.stringify(err) });
+    }
+  }
+}
+
+// --- 3. 样式与图标 ---
+
+class ColorPalette {
+  static readonly background: string = '#FFFFFF'; // [修改] 背景改为纯白
+  static readonly cardBackground: string = '#FFFFFF'; // 卡片也为白
+  static readonly primary: string = '#279184'; // 核心绿
+  static readonly primaryDark: string = '#15803D';
+  static readonly secondary: string = '#FBBF24';
+
+  // [修改] 适配白色背景的文字颜色
+  static readonly textPrimary: ResourceColor = '#111827'; // 深黑色
+  static readonly textSecondary: ResourceColor = '#6B7280'; // 中灰色
+  static readonly textDisabled: string = '#D1D5DB'; // 浅灰色
+
+  static readonly divider: string = '#E5E7EB';
+  static readonly success: string = '#279184';
+  static readonly warning: string = '#FCD34D';
+  static readonly danger: string = '#F87171';
+  static readonly shadow: string = 'rgba(0, 0, 0, 0.05)'; // 阴影改为黑色半透明
+  static readonly inputBg: string = '#F3F4F6'; // 输入框背景浅灰
+}
+
+@Builder function IconLeaf(color: ResourceColor, size: number) {
+  Stack() { Path().commands('M12 2 C6 2 2 8 2 14 C2 19 6 22 12 22 C18 22 22 19 22 14 C22 8 18 2 12 2 Z M12 22 C12 18 12 14 18 8').fill('none').stroke(color).strokeWidth(2).width(size).height(size) }.width(size).height(size)
+}
+
+@Builder function IconSend(color: ResourceColor, size: number) {
+  Stack() { Path().commands('M2 21 L23 12 L2 3 L2 10 L17 12 L2 14 L2 21 Z').fill(color).width(size).height(size) }.width(size).height(size)
+}
+
+// --- 4. 独立组件 ---
+
+@Component
+struct TodoItem {
+  @ObjectLink task: TodoTask;
+  @State textWidth: number = 0;
+  @State lineWidth: number = 0;
+  @State scaleValue: number = 1.0;
+  @State rotateValue: number = 0;
+
+  onDelete: () => void = () => {};
+  onToggle: () => void = () => {};
+
+  animateCheckboxToggle(newValue: boolean) {
+    this.onToggle();
+    if (newValue) {
+      animateTo({ duration: 350, curve: Curve.EaseOut }, () => {
+        this.scaleValue = 1.25;
+        this.rotateValue = 360;
+      });
+      setTimeout(() => {
+        animateTo({ duration: 300, curve: curves.springMotion(0.4, 0.6) }, () => {
+          this.scaleValue = 1.0;
+          this.rotateValue = 0;
+        });
+      }, 200);
+    } else {
+      animateTo({ duration: 250, curve: Curve.EaseOut }, () => {
+        this.scaleValue = 1.0;
+        this.rotateValue = 0;
+      });
+    }
+  }
+
+  build() {
+    ListItem() {
+      Row() {
+        Stack({ alignContent: Alignment.Center }) {
+          Checkbox({ name: 'task_' + this.task.id })
+            .select(this.task.isCompleted)
+            .selectedColor(ColorPalette.success)
+            .shape(CheckBoxShape.CIRCLE)
+            .width(24)
+            .height(24)
+            .margin({ right: 4 })
+            .scale({ x: this.scaleValue, y: this.scaleValue })
+            .rotate({ angle: this.rotateValue, centerX: '50%', centerY: '50%' })
+            .hitTestBehavior(HitTestMode.None)
+        }
+        .width(30).height(30).margin({ right: 4 })
+
+        Row() {
+          Stack({ alignContent: Alignment.Center }) {
+            Text(this.task.content)
+              .fontSize(16)
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.task.isCompleted ? ColorPalette.textDisabled : ColorPalette.textPrimary)
+              .maxLines(2)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .onAreaChange((oldValue, newValue) => {
+                this.textWidth = Number(newValue.width);
+                if (this.task.isCompleted) {
+                  this.lineWidth = this.textWidth;
+                }
+              })
+
+            if (this.task.isCompleted) {
+              Row()
+                .width(this.textWidth)
+                .height(1.5)
+                .backgroundColor(ColorPalette.textDisabled)
+                .transition({ type: TransitionType.Insert, scale: { x: 0, y: 1, centerX: 0 } })
+            }
+          }
+        }
+        .layoutWeight(1)
+        .justifyContent(FlexAlign.Start)
+        .margin({ left: 4 })
+
+        Text(this.task.dateStr)
+          .fontSize(12)
+          .fontColor(ColorPalette.textSecondary)
+          .margin({ left: 8, right: 4 })
+
+      }
+      .width('100%')
+      .padding(16)
+      .backgroundColor(ColorPalette.cardBackground)
+      .borderRadius(16)
+      // 增加阴影以适应白色背景
+      .shadow({ radius: 8, color: 'rgba(0,0,0,0.05)', offsetY: 2 })
+      .onClick(() => {
+        this.animateCheckboxToggle(!this.task.isCompleted);
+      })
+    }
+    .swipeAction({ end: this.DeleteButton() })
+  }
+
+  @Builder DeleteButton() {
+    Button() { Text('🗑️').fontSize(20) }
+    .type(ButtonType.Normal).backgroundColor(ColorPalette.danger).width(60).height('100%').borderRadius(0)
+    .onClick(() => {
+      animateTo({ duration: 300 }, () => { this.onDelete(); })
+    })
+  }
+}
+
+@CustomDialog
+struct StudentDataDialog {
+  controller: CustomDialogController;
+  @Link student: Student;
+  @Link allEvents: CalendarEvent[];
+
+  build() {
+    Column() {
+      Row() {
+        Text(this.student.name + ' / 档案').fontSize(22).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+        Text('收起').fontSize(13).fontColor(ColorPalette.textSecondary).backgroundColor(ColorPalette.inputBg)
+          .padding({ left: 14, right: 14, top: 6, bottom: 6 }).borderRadius(14)
+          .onClick(() => this.controller.close())
+      }.width('100%').justifyContent(FlexAlign.SpaceBetween).margin({ bottom: 20 })
+
+      Scroll() {
+        Column({ space: 16 }) {
+          Row() {
+            Column() {
+              Text('总课时').fontSize(12).fontColor(ColorPalette.textSecondary).margin({ bottom: 6 })
+              Text(`${this.student.totalHours}`).fontSize(24).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+            }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+            Divider().vertical(true).height(30).color(ColorPalette.divider)
+            Column() {
+              Text('已消').fontSize(12).fontColor(ColorPalette.textSecondary).margin({ bottom: 6 })
+              Text(`${this.student.totalHours - this.student.remainingHours}`).fontSize(24).fontWeight(FontWeight.Bold).fontColor(ColorPalette.success)
+            }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+            Divider().vertical(true).height(30).color(ColorPalette.divider)
+            Column() {
+              Text('剩余').fontSize(12).fontColor(ColorPalette.textSecondary).margin({ bottom: 6 })
+              Text(`${this.student.remainingHours}`).fontSize(24).fontWeight(FontWeight.Bold).fontColor(ColorPalette.primary)
+            }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+          }.width('100%').padding(20).backgroundColor(ColorPalette.inputBg).borderRadius(20)
+
+          Row() {
+            Text('缴费: ' + this.student.paymentDate).fontSize(13).fontColor(ColorPalette.textSecondary)
+            Blank()
+            Text('¥' + this.student.paymentAmount).fontSize(15).fontColor(ColorPalette.textPrimary).fontWeight(FontWeight.Bold)
+          }.width('100%').padding({ left: 8, right: 8 })
+
+          Text('记录明细').fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary).width('100%').margin({ top: 12 })
+
+          List({ space: 10 }) {
+            ForEach(this.allEvents.filter(e => e.studentId === this.student.id && e.type === 'class'), (ev: CalendarEvent) => {
+              ListItem() {
+                Row() {
+                  Column() {
+                    Text(ev.date).fontSize(14).fontWeight(FontWeight.Medium).fontColor(ColorPalette.textPrimary)
+                    Text(ev.time).fontSize(12).fontColor(ColorPalette.textSecondary).margin({ top: 2 })
+                  }.alignItems(HorizontalAlign.Start)
+                  Blank()
+                  if (ev.status === 'completed') {
+                    Text('已消').fontSize(11).fontColor(ColorPalette.success).border({ width: 1, color: ColorPalette.success }).padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(4)
+                  } else {
+                    Text('待上').fontSize(11).fontColor(ColorPalette.warning).border({ width: 1, color: ColorPalette.warning }).padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(4)
+                  }
+                }.width('100%').padding(12).backgroundColor(ColorPalette.inputBg).borderRadius(12)
+              }
+            })
+          }.width('100%').height(240)
+        }
+      }.layoutWeight(1).scrollBar(BarState.Off)
+
+      Button('导出数据 (CSV)').width('100%').height(50).backgroundColor(ColorPalette.primary).fontColor(Color.White).fontSize(16).fontWeight(FontWeight.Bold).margin({ top: 20 }).borderRadius(25)
+        .shadow({ radius: 10, color: ColorPalette.shadow, offsetY: 4 })
+        .onClick(() => { DataExporter.exportStudentData(this.student, this.allEvents); })
+
+    }.width('100%').height('100%').padding({ left: 24, right: 24, bottom: 32, top: 48 }).backgroundColor(Color.White)
+  }
+}
+
+@CustomDialog
+struct AddDialog {
+  controller: CustomDialogController;
+  type: 'class' | 'inspiration' | 'student_add' = 'class';
+  @Link students: Student[];
+  @Link events: CalendarEvent[];
+  selectedDate: Date = new Date();
+
+  @State nameInput: string = '';
+  @State hoursInput: string = '';
+  @State noteInput: string = '';
+  @State amountInput: string = '';
+  @State selectedStudentIds: number[] = [];
+  @State timeInput: string = '10:00';
+  @State contentInput: string = '';
+
+  build() {
+    Column() {
+      Text(this.type === 'class' ? '排一节课' : (this.type === 'inspiration' ? '记录灵感' : '新增学生'))
+        .fontSize(22).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary).margin({ bottom: 24, top: 8 }).width('100%').textAlign(TextAlign.Start)
+
+      if (this.type === 'student_add') {
+        Column({ space: 14 }) {
+          TextInput({ placeholder: '学生姓名', text: this.nameInput })
+            .backgroundColor(ColorPalette.inputBg).borderRadius(12).height(50).width('100%')
+            .placeholderColor(ColorPalette.textSecondary).fontColor(ColorPalette.textPrimary)
+            .onChange((val) => this.nameInput = val)
+          Row({ space: 12 }) {
+            TextInput({ placeholder: '购买课时', text: this.hoursInput })
+              .type(InputType.Number).backgroundColor(ColorPalette.inputBg).borderRadius(12).height(50).layoutWeight(1)
+              .placeholderColor(ColorPalette.textSecondary).fontColor(ColorPalette.textPrimary)
+              .onChange((val) => this.hoursInput = val)
+            TextInput({ placeholder: '缴费金额', text: this.amountInput })
+              .type(InputType.Number).backgroundColor(ColorPalette.inputBg).borderRadius(12).height(50).layoutWeight(1)
+              .placeholderColor(ColorPalette.textSecondary).fontColor(ColorPalette.textPrimary)
+              .onChange((val) => this.amountInput = val)
+          }
+          TextInput({ placeholder: '备注 (选填)', text: this.noteInput })
+            .backgroundColor(ColorPalette.inputBg).borderRadius(12).height(50).width('100%')
+            .placeholderColor(ColorPalette.textSecondary).fontColor(ColorPalette.textPrimary)
+            .onChange((val) => this.noteInput = val)
+        }
+      } else if (this.type === 'class') {
+        Column({ space: 12 }) {
+          Text('选择学生').fontSize(14).fontColor(ColorPalette.textSecondary).width('100%').margin({ bottom: 4 })
+          if (this.students.length === 0) {
+            Text('暂无学生，请先添加').fontSize(14).fontColor(ColorPalette.primary).backgroundColor(ColorPalette.inputBg).padding(12).borderRadius(12).width('100%').textAlign(TextAlign.Center)
+          } else {
+            Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Start }) {
+              ForEach(this.students, (s: Student) => {
+                Text(s.name).fontSize(14).fontWeight(this.selectedStudentIds.includes(s.id) ? FontWeight.Bold : FontWeight.Normal)
+                  .fontColor(this.selectedStudentIds.includes(s.id) ? Color.White : ColorPalette.textPrimary).padding({ left: 16, right: 16, top: 8, bottom: 8 })
+                  .backgroundColor(this.selectedStudentIds.includes(s.id) ? ColorPalette.primary : ColorPalette.inputBg).borderRadius(20).margin({ right: 8, bottom: 8 })
+                  .onClick(() => {
+                    if (this.selectedStudentIds.includes(s.id)) { this.selectedStudentIds = this.selectedStudentIds.filter(id => id !== s.id); }
+                    else { this.selectedStudentIds.push(s.id); }
+                  })
+              })
+            }.margin({ bottom: 8 })
+          }
+          TextInput({ text: this.timeInput, placeholder: '时间' })
+            .backgroundColor(ColorPalette.inputBg).fontColor(ColorPalette.textPrimary).fontSize(18).textAlign(TextAlign.Center).borderRadius(12).height(50).width('100%')
+            .onChange((val: string) => this.timeInput = val)
+        }
+      } else {
+        TextArea({ placeholder: '写下你的想法...' }).height(120).backgroundColor(ColorPalette.inputBg).borderRadius(12).padding(16)
+          .placeholderColor(ColorPalette.textSecondary).fontColor(ColorPalette.textPrimary)
+          .onChange((val: string) => this.contentInput = val)
+      }
+
+      Row({ space: 16 }) {
+        Button('取消').backgroundColor(ColorPalette.inputBg).fontColor(ColorPalette.textSecondary).layoutWeight(1).height(48).borderRadius(24).onClick(() => this.controller.close())
+        Button('确认').backgroundColor(ColorPalette.primary).fontColor(Color.White).layoutWeight(1).height(48).borderRadius(24).shadow({radius:8, color:ColorPalette.shadow, offsetY:4}).onClick(() => this.handleSubmit())
+      }.margin({ top: 24 }).width('100%')
+    }.padding(24).backgroundColor(Color.White).borderRadius(24).width('85%')
+  }
+
+  handleSubmit() {
+    if (this.type === 'student_add') {
+      if (!this.nameInput) return;
+      const exists = this.students.some(s => s.name === this.nameInput);
+      if (exists) { try { promptAction.showToast({ message: '学生已存在' }); } catch(e){} return; }
+      this.students.push(new Student(this.nameInput, parseInt(this.hoursInput) || 0, this.noteInput, parseInt(this.amountInput) || 0));
+    } else if (this.type === 'class') {
+      if (this.selectedStudentIds.length === 0) return;
+      this.selectedStudentIds.forEach(id => {
+        const evt = new CalendarEvent('class', this.selectedDate.toISOString().split('T')[0]);
+        evt.studentId = id;
+        evt.time = this.timeInput;
+        this.events.push(evt);
+      });
+      try { promptAction.showToast({ message: '排课成功', duration: 2000 }); } catch(e){}
+    } else {
+      if (!this.contentInput) return;
+      const evt = new CalendarEvent('inspiration', this.selectedDate.toISOString().split('T')[0]);
+      evt.content = this.contentInput;
+      this.events.push(evt);
+    }
+    this.controller.close();
+  }
+}
+
+// --- 5. 主应用入口 ---
+
+@Entry
+@Component
+struct ClassRecorderApp {
+  @StorageLink('students_data') students: Student[] = [];
+  @StorageLink('events_data') events: CalendarEvent[] = [];
+  @StorageLink('todo_data') todoTasks: TodoTask[] = [];
+
+  @State currentTabIndex: number = 0;
+  private tabsController: TabsController = new TabsController();
+
+  @State currentDate: Date = new Date();
+  @State selectedDate: Date = new Date();
+  @State isSheetShown: boolean = false;
+  @State dialogType: 'class' | 'inspiration' | 'student_add' = 'class';
+
+  @State currentViewingStudent: Student = new Student('', 0, '');
+  @State currentViewingEvents: CalendarEvent[] = [];
+
+  @State newTodoContent: string = '';
+
+  studentDataDialogController: CustomDialogController = new CustomDialogController({
+    builder: StudentDataDialog({
+      student: $currentViewingStudent,
+      allEvents: $currentViewingEvents
+    }),
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    autoCancel: true
+  });
+
+  dialogController: CustomDialogController = new CustomDialogController({
+    builder: AddDialog({ type: this.dialogType, students: $students, events: $events, selectedDate: this.selectedDate }),
+    alignment: DialogAlignment.Center,
+    customStyle: true,
+    autoCancel: true
+  });
+
+  setStatusBar() {
+    try {
+      window.getLastWindow(getContext(this)).then((win) => {
+        win.setWindowLayoutFullScreen(true);
+        // [修复] 状态栏文字改为黑色 (适配白色背景)
+        win.setWindowSystemBarProperties({ statusBarColor: '#00FFFFFF', statusBarContentColor: '#000000', navigationBarColor: ColorPalette.background, navigationBarContentColor: '#000000' })
+      })
+    } catch (err) {}
+  }
+
+  aboutToAppear() { this.setStatusBar(); }
+  onPageShow() { this.setStatusBar(); }
+
+  build() {
+    Stack({ alignContent: Alignment.Bottom }) {
+      Tabs({ controller: this.tabsController, barPosition: BarPosition.End }) {
+        TabContent() { this.CalendarView() }
+        TabContent() { this.StudentsView() }
+        TabContent() { this.TodoListView() }
+      }
+      .barHeight(0).scrollable(false).backgroundColor(ColorPalette.background)
+
+      Row() {
+        this.CustomTabItem(0, '日历', $r('sys.symbol.calendar'))
+        this.CustomTabItem(1, '学生', $r('sys.symbol.person_2'))
+        this.CustomTabItem(2, '待办', $r('sys.symbol.doc_plaintext'))
+      }.width('100%').height(80).backgroundColor(ColorPalette.background).padding({ bottom: 16 }).justifyContent(FlexAlign.SpaceAround)
+
+    }.width('100%').height('100%').backgroundColor(ColorPalette.background).bindSheet($$this.isSheetShown, this.SheetContent(), { height: SheetSize.MEDIUM, dragBar: false, backgroundColor: Color.White, showClose: false })
+  }
+
+  openDialog(type: 'class' | 'inspiration' | 'student_add') {
+    this.dialogType = type;
+    this.dialogController.open();
+  }
+
+  openStudentData(index: number) {
+    this.currentViewingStudent = this.students[index];
+    this.currentViewingEvents = this.events;
+    this.studentDataDialogController.open();
+  }
+
+  getIncompleteTasks(selectedDateStr: string): TodoTask[] {
+    return this.todoTasks.filter(t => t.dateStr === selectedDateStr && !t.isCompleted).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  getCompletedTasks(selectedDateStr: string): TodoTask[] {
+    return this.todoTasks.filter(t => t.dateStr === selectedDateStr && t.isCompleted).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  addTodo() {
+    if (!this.newTodoContent.trim()) {
+      promptAction.showToast({ message: '请输入任务内容' });
+      return;
+    }
+    animateTo({ duration: 300 }, () => {
+      const dateStr = formatDate(this.selectedDate);
+      this.todoTasks.unshift(new TodoTask(this.newTodoContent.trim(), dateStr));
+      this.newTodoContent = '';
+    })
+  }
+
+  deleteTask(id: number) {
+    animateTo({ duration: 300 }, () => {
+      this.todoTasks = this.todoTasks.filter(t => t.id !== id);
+    })
+  }
+
+  toggleTask(id: number) {
+    animateTo({ duration: 350, curve: Curve.EaseOut }, () => {
+      const index = this.todoTasks.findIndex(t => t.id === id);
+      if (index !== -1) {
+        let newTask = new TodoTask(this.todoTasks[index].content, this.todoTasks[index].dateStr);
+        newTask.id = this.todoTasks[index].id;
+        newTask.createdAt = this.todoTasks[index].createdAt;
+        newTask.isCompleted = !this.todoTasks[index].isCompleted;
+        this.todoTasks[index] = newTask;
+        this.todoTasks = [...this.todoTasks];
+      }
+    })
+  }
+
+  calculateProgress(): number {
+    const selectedDateStr = formatDate(this.selectedDate);
+    const currentDayTasks = this.todoTasks.filter(t => t.dateStr === selectedDateStr);
+    if (currentDayTasks.length === 0) return 0;
+    const completed = currentDayTasks.filter(t => t.isCompleted).length;
+    return Math.round((completed / currentDayTasks.length) * 100);
+  }
+
+  getEventsForDay(date: Date | null): CalendarEvent[] {
+    if (!date) return [];
+    return this.events.filter(e => e.date === formatDate(date));
+  }
+
+  getGroupedEvents(date: Date): EventGroup[] {
+    const rawEvents = this.getEventsForDay(date);
+    const groups: EventGroup[] = [];
+    const classEvents = rawEvents.filter(e => e.type === 'class');
+    const inspirationEvents = rawEvents.filter(e => e.type === 'inspiration');
+    const timeMap = new Map<string, CalendarEvent[]>();
+    classEvents.forEach(ev => { if (!timeMap.has(ev.time)) { timeMap.set(ev.time, []); } timeMap.get(ev.time)?.push(ev); });
+    timeMap.forEach((events, time) => { groups.push(new EventGroup(time, 'class', events)); });
+    inspirationEvents.forEach(ev => { groups.push(new EventGroup(ev.time || '全天', 'inspiration', [ev])); });
+    return groups.sort((a, b) => a.time.localeCompare(b.time));
+  }
+
+  @Builder DeleteAction(key: number, type: 'student' | 'event_id') {
+    Button() { Text('🗑️').fontSize(24) }
+    .type(ButtonType.Normal).backgroundColor(ColorPalette.danger).width(80).height('100%').borderRadius(0)
+    .onClick(() => { animateTo({ duration: 300 }, () => { if (type === 'student') this.students.splice(key, 1); else this.events = this.events.filter(e => e.id !== key); }) })
+  }
+
+  @Builder CustomTabItem(index: number, name: string, symbol: Resource) {
+    Column() {
+      SymbolGlyph(symbol)
+        .fontSize(24)
+        // [修复] Tab 图标颜色：选中为绿色，未选中为灰色
+        .fontColor([this.currentTabIndex === index ? ColorPalette.primary : ColorPalette.textSecondary])
+        .margin({ bottom: 4 })
+      Text(name).fontColor(this.currentTabIndex === index ? ColorPalette.primary : ColorPalette.textSecondary).fontSize(11).fontWeight(this.currentTabIndex === index ? FontWeight.Bold : FontWeight.Normal)
+    }.justifyContent(FlexAlign.Center).height('100%').layoutWeight(1).onClick(() => { this.currentTabIndex = index; this.tabsController.changeIndex(index); })
+  }
+
+  @Builder CalendarView() {
+    Stack() {
+      Stack() { IconLeaf(ColorPalette.secondary, 120) }.position({ x: -30, y: 40 }).opacity(0.1).rotate({ angle: -30 })
+      Stack() { IconLeaf(ColorPalette.primary, 150) }.position({ x: '80%', y: '70%' }).opacity(0.05).rotate({ angle: 45 })
+
+      Column() {
+        Row() { Text('课时记').fontSize(30).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary).letterSpacing(2) }
+        .width('100%').justifyContent(FlexAlign.Center).padding({ top: 48, bottom: 10 })
+
+        Scroll() {
+          Column() {
+            Column() {
+              Row() {
+                Button() { Text('<').fontSize(20).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary) }
+                .type(ButtonType.Circle).backgroundColor('rgba(0,0,0,0.03)').width(40).height(40)
+                .onClick(() => { let d = new Date(this.currentDate); d.setMonth(d.getMonth() - 1); this.currentDate = d; })
+                Column() {
+                  Text(`${this.currentDate.getMonth() + 1}月`).fontSize(26).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+                  Text(`${this.currentDate.getFullYear()}`).fontSize(14).fontColor(ColorPalette.textSecondary).letterSpacing(1)
+                }.margin({ left: 24, right: 24 }).onClick(() => {
+                  DatePickerDialog.show({ start: new Date("2020-1-1"), end: new Date("2100-12-31"), selected: this.currentDate, onAccept: (value: DatePickerResult) => { this.currentDate = new Date(value.year!, value.month!, 1); } })
+                })
+                Button() { Text('>').fontSize(20).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary) }
+                .type(ButtonType.Circle).backgroundColor('rgba(0,0,0,0.03)').width(40).height(40)
+                .onClick(() => { let d = new Date(this.currentDate); d.setMonth(d.getMonth() + 1); this.currentDate = d; })
+              }.width('100%').justifyContent(FlexAlign.Center).margin({ top: 16, bottom: 24 })
+
+              Flex({ justifyContent: FlexAlign.SpaceAround }) {
+                ForEach(['日', '一', '二', '三', '四', '五', '六'], (day: string) => { Text(day).fontSize(13).fontColor(ColorPalette.textSecondary).fontWeight(FontWeight.Medium) })
+              }.padding({ left: 12, right: 12 }).margin({ bottom: 12 })
+
+              Grid() {
+                ForEach(getDaysInMonth(this.currentDate), (date: Date | null) => {
+                  GridItem() {
+                    if (date) {
+                      Column() {
+                        Text(`${date.getDate()}`).fontSize(16).fontWeight(FontWeight.Medium)
+                          .fontColor(formatDate(date) === formatDate(new Date()) ? Color.White : (formatDate(date) === formatDate(this.selectedDate) ? ColorPalette.primary : ColorPalette.textPrimary))
+                          .width(42).height(42).textAlign(TextAlign.Center).borderRadius(21)
+                          .backgroundColor(formatDate(date) === formatDate(new Date()) ? ColorPalette.primary : (formatDate(date) === formatDate(this.selectedDate) ? '#E0F2F1' : Color.Transparent))
+                          .shadow({ radius: formatDate(date) === formatDate(new Date()) ? 8 : 0, color: ColorPalette.shadow, offsetY: 3 })
+                        Row({ space: 4 }) {
+                          if (this.getEventsForDay(date).some(e => e.type === 'class')) Circle({ width: 4, height: 4 }).fill(ColorPalette.primary)
+                          if (this.getEventsForDay(date).some(e => e.type === 'inspiration')) Circle({ width: 4, height: 4 }).fill(ColorPalette.secondary)
+                        }.margin({ top: 6 })
+                      }.height(68).width('100%').justifyContent(FlexAlign.Start).onClick(() => { this.selectedDate = date; this.isSheetShown = true; })
+                    }
+                  }
+                })
+              }.columnsTemplate('1fr 1fr 1fr 1fr 1fr 1fr 1fr').rowsGap(8).padding({ left: 12, right: 12 }).height(360)
+            }
+            .width('90%')
+            .backgroundColor('rgba(255,255,255,0.8)')
+            .backdropBlur(20)
+            .borderRadius(32)
+            .padding({ top: 24, bottom: 24 })
+            .margin({ top: 10 })
+            .shadow({ radius: 30, color: 'rgba(0,0,0,0.05)', offsetY: 10 })
+
+            Row() {
+              Column() {
+                Text('今日概览').fontSize(14).fontColor(ColorPalette.primary).fontWeight(FontWeight.Bold).margin({ bottom: 4 })
+                Text(`${this.getEventsForDay(new Date()).length} 项日程`).fontSize(22).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+              }.alignItems(HorizontalAlign.Start)
+              Text('📅').fontSize(48)
+            }
+            .width('90%').backgroundColor(Color.White).borderRadius(24).padding(24).justifyContent(FlexAlign.SpaceBetween).margin({ top: 20 })
+            .shadow({ radius: 24, color: 'rgba(0,0,0,0.05)', offsetY: 8 })
+            .onClick(() => { this.selectedDate = new Date(); this.isSheetShown = true; })
+
+          }.padding({ bottom: 160 })
+        }.scrollBar(BarState.Off).layoutWeight(1).edgeEffect(EdgeEffect.Spring)
+      }
+    }.width('100%').height('100%').backgroundColor(ColorPalette.background)
+  }
+
+  @Builder StudentsView() {
+    Stack() {
+      Column().width('100%').height('100%').backgroundColor(ColorPalette.background)
+      Column() {
+        Row() {
+          Text('学生管理').fontSize(28).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+          Button('+ 新增').height(40).fontSize(15).fontWeight(FontWeight.Bold).backgroundColor(ColorPalette.primary).borderRadius(20)
+            .shadow({ radius: 8, color: ColorPalette.shadow, offsetY: 4 }).onClick(() => this.openDialog('student_add'))
+        }.width('100%').justifyContent(FlexAlign.SpaceBetween).padding({ left: 24, right: 24, top: 56, bottom: 24 })
+
+        List({ space: 16 }) {
+          ForEach(this.students, (student: Student, index: number) => {
+            ListItem() {
+              Row() {
+                Stack({ alignContent: Alignment.Center }) {
+                  Circle().width(56).height(56).fill(ColorPalette.inputBg)
+                  Text(student.name.substring(0, 1)).fontSize(24).fontWeight(FontWeight.Bold).fontColor(ColorPalette.primary)
+                }.margin({ right: 16 })
+                Column() {
+                  Row() {
+                    Text(student.name).fontSize(18).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+                    if (student.remainingHours <= 3) Text('余额不足').fontSize(11).fontColor(Color.White).backgroundColor(ColorPalette.danger).padding({ left: 6, right: 6, top: 2, bottom: 2 }).borderRadius(8).margin({ left: 8 })
+                  }
+                  Text(student.note || '无备注').fontSize(14).fontColor(ColorPalette.textSecondary).margin({ top: 4 })
+                }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+                Column() {
+                  Text('剩余').fontSize(12).fontColor(ColorPalette.textSecondary)
+                  Text() { Span(`${student.remainingHours}`).fontSize(22).fontWeight(FontWeight.Bold).fontColor(student.remainingHours <= 3 ? ColorPalette.danger : ColorPalette.primary); Span(` / ${student.totalHours}`).fontSize(14).fontColor(ColorPalette.textSecondary) }
+                }
+              }.padding(20).width('100%').backgroundColor(Color.White).borderRadius(24).shadow({ radius: 10, color: 'rgba(0,0,0,0.03)', offsetY: 4 })
+              .onClick(() => { this.openStudentData(index); })
+            }.swipeAction({ end: this.DeleteAction(index, 'student') })
+          })
+        }.width('100%').padding({ left: 20, right: 20, bottom: 120 }).layoutWeight(1).edgeEffect(EdgeEffect.Spring)
+      }
+    }
+  }
+
+  @Builder TodoListView() {
+    Column() {
+      Row() {
+        // 头部日期标题与选择器触发区
+        Column() {
+          Row() {
+            Text('待办清单').fontSize(28).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+            // [新增] 点击图标弹出系统日历选择器
+            SymbolGlyph($r('sys.symbol.calendar'))
+              .fontSize(24)
+              .fontColor([ColorPalette.primary])
+              .margin({ left: 8 })
+              .onClick(() => {
+                DatePickerDialog.show({
+                  start: new Date("2020-1-1"),
+                  end: new Date("2100-12-31"),
+                  selected: this.selectedDate,
+                  onDateAccept: (value: Date) => {
+                    // [修复] 重新构造 Date 对象，避免 timezone 偏差
+                    // value 返回的已经是本地时间的年/月/日
+                    this.selectedDate = new Date(value.getFullYear(), value.getMonth(), value.getDate());
+                  }
+                })
+              })
+          }.alignItems(VerticalAlign.Center)
+
+          Text(`${this.getIncompleteTasks(formatDate(this.selectedDate)).length} 个未完成  |  ${formatDate(this.selectedDate)}`)
+            .fontSize(14).fontColor(ColorPalette.textSecondary).margin({ top: 4 })
+        }.alignItems(HorizontalAlign.Start)
+
+        Stack({ alignContent: Alignment.Center }) {
+          Progress({ value: this.calculateProgress(), total: 100, type: ProgressType.Ring })
+            .color(ColorPalette.primary)
+            .backgroundColor(ColorPalette.inputBg)
+            .style({ strokeWidth: 8 })
+            .width(60).height(60)
+          Text(`${this.calculateProgress()}%`).fontSize(14).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+        }
+      }
+      .width('100%').justifyContent(FlexAlign.SpaceBetween).padding({ left: 24, right: 24, top: 56, bottom: 24 })
+
+      List({ space: 12 }) {
+        ForEach(this.getIncompleteTasks(formatDate(this.selectedDate)), (task: TodoTask) => {
+          ListItem() {
+            TodoItem({
+              task: task,
+              onDelete: () => { this.deleteTask(task.id); },
+              onToggle: () => { this.toggleTask(task.id); }
+            })
+          }
+        }, (item: TodoTask) => item.id.toString())
+
+        if (this.getCompletedTasks(formatDate(this.selectedDate)).length > 0) {
+          ListItem() {
+            Text('已完成').fontSize(14).fontColor(ColorPalette.textSecondary).fontWeight(FontWeight.Bold).margin({ top: 16, bottom: 8 })
+          }
+          ForEach(this.getCompletedTasks(formatDate(this.selectedDate)), (task: TodoTask) => {
+            ListItem() {
+              TodoItem({
+                task: task,
+                onDelete: () => { this.deleteTask(task.id); },
+                onToggle: () => { this.toggleTask(task.id); }
+              })
+            }
+          }, (item: TodoTask) => item.id.toString())
+        }
+
+        if (this.getIncompleteTasks(formatDate(this.selectedDate)).length === 0 &&
+          this.getCompletedTasks(formatDate(this.selectedDate)).length === 0) {
+          ListItem() {
+            Text(`🎉 无待办事项`).fontSize(16).fontColor(ColorPalette.textSecondary)
+              .width('100%').textAlign(TextAlign.Center).padding(20)
+          }
+        }
+      }
+      .width('100%').layoutWeight(1).padding({ left: 20, right: 20, bottom: 20 })
+      .edgeEffect(EdgeEffect.Spring)
+
+      Row({ space: 12 }) {
+        TextInput({ placeholder: '添加新任务...', text: this.newTodoContent })
+          .layoutWeight(1)
+          .height(50)
+          .backgroundColor(Color.White)
+          .borderRadius(12)
+          .fontColor(Color.Black)
+          .placeholderColor(ColorPalette.textSecondary)
+          .padding({ left: 20, right: 20 })
+          .shadow({ radius: 10, color: 'rgba(0,0,0,0.05)', offsetY: 4 })
+          .enterKeyType(EnterKeyType.Done)
+          .onChange((val) => this.newTodoContent = val)
+          .onSubmit(() => this.addTodo())
+
+        Button({ type: ButtonType.Normal }) {
+          Text('+').fontSize(32).fontColor(Color.White).fontWeight(FontWeight.Lighter).height('100%').textAlign(TextAlign.Center)
+        }
+        .width(50).height(50).borderRadius(12).backgroundColor(ColorPalette.primary)
+        .shadow({ radius: 10, color: ColorPalette.shadow, offsetY: 4 })
+        .onClick(() => this.addTodo())
+      }
+      .width('100%')
+      .padding({ left: 20, right: 20, bottom: 100 })
+      .backgroundColor('transparent')
+    }
+    .width('100%').height('100%').backgroundColor(ColorPalette.background)
+  }
+
+  @Builder SheetContent() {
+    Column() {
+      Row() {
+        Text(`${this.selectedDate.getMonth() + 1}月${this.selectedDate.getDate()}日`).fontSize(26).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+        Text('收起').fontSize(13).fontColor(Color.White).backgroundColor(ColorPalette.primary).padding({ left: 14, right: 14, top: 8, bottom: 8 }).borderRadius(20).onClick(() => this.isSheetShown = false)
+      }.width('100%').justifyContent(FlexAlign.SpaceBetween).margin({ bottom: 24 })
+
+      Row({ space: 16 }) {
+        Button() { Row() { SymbolGlyph($r('sys.symbol.calendar')).fontSize(24).fontColor([ColorPalette.primary]); Text(' 排一节课').fontSize(17).fontWeight(FontWeight.Bold).fontColor(ColorPalette.primary).margin({ left: 8 }) } }
+        .backgroundColor(Color.White).type(ButtonType.Normal).borderRadius(24).layoutWeight(1).height(64).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
+        .onClick(() => { this.isSheetShown = false; this.openDialog('class'); })
+        Button() { Row() { SymbolGlyph($r('sys.symbol.lightbulb')).fontSize(24).fontColor([ColorPalette.secondary]); Text(' 记个灵感').fontSize(17).fontWeight(FontWeight.Bold).fontColor(ColorPalette.secondary).margin({ left: 8 }) } }
+        .backgroundColor(Color.White).type(ButtonType.Normal).borderRadius(24).layoutWeight(1).height(64).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
+        .onClick(() => { this.isSheetShown = false; this.openDialog('inspiration'); })
+      }.margin({ bottom: 28 })
+
+      List({ space: 16 }) {
+        ForEach(this.getGroupedEvents(this.selectedDate), (group: EventGroup) => {
+          ListItem() {
+            if (group.type === 'class') {
+              Column() {
+                Row() {
+                  Column().width(6).height(48).backgroundColor(ColorPalette.primary).borderRadius(3).margin({ right: 16 })
+                  Column() {
+                    Row() {
+                      Text(group.time).fontSize(20).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
+                      if (group.events.every(e => e.status === 'completed')) Text('已完成').fontSize(11).fontColor(Color.White).backgroundColor(ColorPalette.success).padding({left:8, right:8, top:3, bottom:3}).borderRadius(10)
+                    }.width('100%').justifyContent(FlexAlign.SpaceBetween)
+                    Text() {
+                      ForEach(group.events, (ev: CalendarEvent, idx: number) => {
+                        Span((this.students.find(s => s.id === ev.studentId)?.name || '未知') + (idx < group.events.length - 1 ? '、' : '')).fontSize(16).fontColor(ColorPalette.textSecondary)
+                      })
+                    }.margin({ top: 6 })
+                  }.layoutWeight(1)
+                }.width('100%').alignItems(VerticalAlign.Top)
+                Row() {
+                  if (!group.events.every(e => e.status === 'completed')) {
+                    Button('完成')
+                      .fontSize(14).fontColor(Color.White).fontWeight(FontWeight.Bold)
+                      .backgroundColor(ColorPalette.success).height(38).borderRadius(19).padding({ left: 24, right: 24 })
+                      .shadow({ radius: 6, color: ColorPalette.shadow, offsetY: 2 })
+                      .onClick(() => {
+                        const eventIds = group.events.map(e => e.id);
+                        const studentIds = group.events.map(e => e.studentId);
+                        this.events = this.events.map(ev => {
+                          if (eventIds.includes(ev.id)) {
+                            let nev = new CalendarEvent(ev.type, ev.date);
+                            nev.id = ev.id; nev.studentId = ev.studentId; nev.content = ev.content; nev.time = ev.time; nev.status = 'completed';
+                            return nev;
+                          }
+                          return ev;
+                        });
+                        this.students = this.students.map(stu => {
+                          if (studentIds.includes(stu.id)) {
+                            let nstu = new Student(stu.name, stu.totalHours, stu.note, stu.paymentAmount);
+                            nstu.id = stu.id; nstu.remainingHours = stu.remainingHours - 1; nstu.paymentDate = stu.paymentDate;
+                            return nstu;
+                          }
+                          return stu;
+                        });
+                        promptAction.showToast({ message: '已完成，课时已扣减' });
+                      })
+                  }
+                  Blank()
+                  Button() { Text('🗑️').fontSize(20) }.backgroundColor('transparent').onClick(() => { this.events = this.events.filter(e => !group.events.some(ge => ge.id === e.id)); })
+                }.width('100%').margin({ top: 16 })
+              }.padding(20).backgroundColor(group.events.every(e => e.status === 'completed') ? '#D1FAE5' : ColorPalette.cardBackground).borderRadius(24).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
+            } else {
+              Column() {
+                Row() { Column().width(6).height(24).backgroundColor(ColorPalette.secondary).borderRadius(3).margin({ right: 16 }); Text('灵感笔记').fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary) }.margin({ bottom: 10 })
+                Text(group.events[0].content).fontSize(16).fontColor(ColorPalette.textPrimary).lineHeight(26)
+                Row() { Blank(); Button() { Text('🗑️').fontSize(20) }.backgroundColor('transparent').onClick(() => this.events = this.events.filter(e => e.id !== group.events[0].id)) }.width('100%').margin({ top: 12 })
+              }.padding(20).backgroundColor('#FEF3C7').borderRadius(24).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
+            }
+          }
+        }, (group: EventGroup) => group.id)
+      }.width('100%').layoutWeight(1).scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
+    }.padding(28).width('100%').height('100%').backgroundColor(Color.White).borderRadius({ topLeft: 32, topRight: 32 })
+  }
+}

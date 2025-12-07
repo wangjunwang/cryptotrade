@@ -1,0 +1,49 @@
+{
+  "shortcuts": [
+    {
+      "shortcutId": "id_add_class",
+      "label": "$string:shortcut_add_class",
+      "icon": "$media:app_icon",
+      "wants": [
+        {
+          "bundleName": "com.example.classnote",
+          "moduleName": "entry",
+          "abilityName": "EntryAbility",
+          "parameters": {
+            "shortcutAction": "open_class"
+          }
+        }
+      ]
+    },
+    {
+      "shortcutId": "id_add_inspiration",
+      "label": "$string:shortcut_add_todo",
+      "icon": "$media:app_icon",
+      "wants": [
+        {
+          "bundleName": "com.example.classnote",
+          "moduleName": "entry",
+          "abilityName": "EntryAbility",
+          "parameters": {
+            "shortcutAction": "open_inspiration"
+          }
+        }
+      ]
+    },
+    {
+      "shortcutId": "id_add_todo",
+      "label": "$string:shortcut_add_todo",
+      "icon": "$media:app_icon",
+      "wants": [
+        {
+          "bundleName": "com.example.classnote",
+          "moduleName": "entry",
+          "abilityName": "EntryAbility",
+          "parameters": {
+            "shortcutAction": "open_todo"
+          }
+        }
+      ]
+    }
+  ]
+}

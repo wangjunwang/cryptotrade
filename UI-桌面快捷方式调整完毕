@@ -1,10 +1,9 @@
 /**
- * 课时记 (Class Recorder) - v18.20 UI细节优化版
+ * 课时记 (Class Recorder) - v18.24 最终精简版
  * * 更新日志:
- * 1. [UI] 首页日程概览中，课程卡片增加"课程信息"标题栏，统一视觉风格。
- * 2. [UI] 灵感笔记卡片增加最小高度 (minHeight: 100)，防止内容较少时卡片过短。
- * 3. [稳健] 保持所有 v18.19 的功能逻辑。
- * 4.但是目前有点卡盹
+ * 1. [清理] 移除了所有 LazyForEach 测试代码 (数据源类、测试组件、测试按钮)，代码回归整洁。
+ * 2. [保留] 保留了之前所有的 UI 优化(v18.21)、交互修复(v18.19)和快捷方式支持(v18.12)。
+ */
 
 import promptAction from '@ohos.promptAction';
 import window from '@ohos.window';
@@ -14,7 +13,7 @@ import common from '@ohos.app.ability.common';
 import { BusinessError } from '@ohos.base';
 import curves from '@ohos.curves';
 
-// --- 0. 全局工具函数 (保持不变) ---
+// --- 0. 全局工具函数 ---
 
 function formatDate(date: Date): string {
   const y = date.getFullYear();
@@ -34,7 +33,7 @@ function getDaysInMonth(date: Date): (Date | null)[] {
   return days;
 }
 
-// --- 1. 数据模型 (保持不变) ---
+// --- 1. 数据模型 ---
 
 @Observed
 class TodoTask {
@@ -107,7 +106,7 @@ PersistentStorage.PersistProp('students_data', []);
 PersistentStorage.PersistProp('events_data', []);
 PersistentStorage.PersistProp('todo_data', []);
 
-// --- 2. 业务逻辑 (保持不变) ---
+// --- 2. 业务逻辑 ---
 
 class DataExporter {
   static async exportStudentData(student: Student, events: CalendarEvent[]) {
@@ -139,7 +138,7 @@ class DataExporter {
   }
 }
 
-// --- 3. 样式配置 (保持不变) ---
+// --- 3. 样式配置 ---
 
 class ColorPalette {
   static readonly background: string = '#F5F7FA';
@@ -164,7 +163,7 @@ class ColorPalette {
   Stack() { Path().commands('M12 2 C6 2 2 8 2 14 C2 19 6 22 12 22 C18 22 22 19 22 14 C22 8 18 2 12 2 Z M12 22 C12 18 12 14 18 8').fill('none').stroke(color).strokeWidth(2).width(size).height(size) }.width(size).height(size)
 }
 
-// --- 4. 独立组件 (保持不变) ---
+// --- 4. 独立组件 ---
 
 @Component
 struct TodoItem {
@@ -693,20 +692,8 @@ struct ClassRecorderApp {
     }.width('100%').height('100%').backgroundColor(ColorPalette.background)
   }
 
-  /**
-   * 课时记 (Class Recorder) - v18.21 布局微调版
-   * * 更新日志:
-   * 1. [UI] 灵感笔记卡片增加 .width('100%')，解决内容少时卡片宽度过窄的问题。
-   * 2. [UI] 课程卡片布局重构：第一行显示"标题+时间+状态"，第二行显示学生名单。
-   * 3. [稳健] 保持所有 v18.20 的功能逻辑。
-   */
-
-  // ... (引入部分、全局函数、数据模型、业务逻辑、样式配置、IconLeaf、TodoItem、StudentDataDialog、AddDialog、ClassRecorderApp结构等 均保持不变) ...
-  // ... (为了节省篇幅，请保留 v18.20 的其他代码，仅替换 SheetContent) ...
-
   @Builder SheetContent() {
     Column() {
-      // 头部
       Row() {
         Row() {
           Text(`${this.selectedDate.getMonth() + 1}月${this.selectedDate.getDate()}日`).fontSize(26).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary)
@@ -716,7 +703,6 @@ struct ClassRecorderApp {
       }.width('100%').justifyContent(FlexAlign.SpaceBetween).margin({ bottom: 24 })
 
       if (this.sheetType === 'events') {
-        // 快捷按钮
         Row({ space: 16 }) {
           Button() { Row() { SymbolGlyph($r('sys.symbol.calendar')).fontSize(24).fontColor([ColorPalette.primary]); Text(' 排一节课').fontSize(17).fontWeight(FontWeight.Bold).fontColor(ColorPalette.primary).margin({ left: 8 }) } }
           .backgroundColor(ColorPalette.classEventBg).type(ButtonType.Normal).borderRadius(24).layoutWeight(1).height(64).shadow({ radius: 8, color: ColorPalette.shadow, offsetY: 3 })
@@ -726,70 +712,37 @@ struct ClassRecorderApp {
           .onClick(() => { this.isSheetShown = false; this.openDialog('inspiration'); })
         }.margin({ bottom: 28 })
 
-        // 列表内容
         List({ space: 16 }) {
           ForEach(this.getGroupedEvents(this.selectedDate), (group: EventGroup) => {
             ListItem() {
               if (group.type === 'class') {
-                // === 课程卡片 (UI重构) ===
                 Column() {
-                  // 第一行：蓝条 | 标题 | 时间 ........ 状态
                   Row() {
-                    // 蓝条
-                    Column().width(6).height(24).backgroundColor(ColorPalette.primary).borderRadius(3).margin({ right: 10 })
-
-                    // 标题
+                    Column().width(6).height(24).backgroundColor(ColorPalette.primary).borderRadius(3).margin({ right: 12 })
                     Text('课程信息').fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary)
-
                     Blank()
-
-                    // 蓝条
                     Column().width(6).height(24).backgroundColor(ColorPalette.primary).borderRadius(3).margin({ right: 3 })
-
-                    // 时间 (紧跟标题)
-                    Text(group.time).fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary).margin({ left: 12 })
-
-                    // 撑开间距
+                    Text(group.time).fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary).margin({ left: 12 })
                     Blank()
-
-                    // 状态 (靠右)
                     if (group.events.every(e => e.status === 'completed')) {
                       Text('已完成').fontSize(12).fontColor(Color.White).backgroundColor(ColorPalette.primary).padding({left:8, right:8, top:4, bottom:4}).borderRadius(10)
                     }
-                  }
-                  .width('100%')
-                  .alignItems(VerticalAlign.Center) // 垂直居中
-                  .margin({ bottom: 12 }) // 与第二行的间距
+                  }.width('100%').alignItems(VerticalAlign.Center).margin({ bottom: 12 })
 
-                  // 第二行：学生名单
                   Text() {
                     ForEach(group.events, (ev: CalendarEvent, idx: number) => {
                       Span((this.students.find(s => s.id === ev.studentId)?.name || '未知') + (idx < group.events.length - 1 ? '、' : '')).fontSize(16).fontColor(ColorPalette.textSecondary)
                     })
                   }.fontSize(16).lineHeight(24).width('100%')
-                }
-                .width('100%') // 确保卡片撑满
-                .padding(16)
-                .backgroundColor(group.events.every(e => e.status === 'completed') ? ColorPalette.classEventBg : ColorPalette.cardBackground)
-                .borderRadius(24)
-                .shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
+                }.width('100%').padding(16).backgroundColor(group.events.every(e => e.status === 'completed') ? ColorPalette.classEventBg : ColorPalette.cardBackground).borderRadius(24).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
               } else {
-                // === 灵感笔记卡片 (修复宽度) ===
                 Column() {
                   Row() {
                     Column().width(6).height(24).backgroundColor(ColorPalette.secondary).borderRadius(3).margin({ right: 12 });
                     Text('灵感笔记').fontSize(16).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textSecondary)
                   }.margin({ bottom: 8 })
-
                   Text(group.events[0].content).fontSize(16).fontColor(ColorPalette.textPrimary).lineHeight(26)
-                }
-                .width('100%') // [关键修复] 强制宽度填满
-                .padding(16)
-                .height(100)
-                .backgroundColor(ColorPalette.inspirationEventBg)
-                .borderRadius(24)
-                .shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 })
-                .alignItems(HorizontalAlign.Start)
+                }.width('100%').padding(16).height(100).backgroundColor(ColorPalette.inspirationEventBg).borderRadius(24).shadow({ radius: 8, color: 'rgba(0,0,0,0.03)', offsetY: 3 }).alignItems(HorizontalAlign.Start)
               }
             }
             .transition(
@@ -816,7 +769,6 @@ struct ClassRecorderApp {
         }.width('100%').layoutWeight(1).scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
 
       } else {
-        // ... (待办列表部分保持不变) ...
         List({ space: 12 }) {
           ForEach(this.getIncompleteTasks(formatDate(this.selectedDate)), (task: TodoTask) => {
             TodoItem({ task: task, onDelete: () => this.deleteTask(task.id), onToggle: () => this.toggleTask(task.id) })
@@ -835,7 +787,7 @@ struct ClassRecorderApp {
         }.width('100%').layoutWeight(1).scrollBar(BarState.Off).edgeEffect(EdgeEffect.Spring)
 
         Row({ space: 12 }) {
-          TextInput({ placeholder: '快速添加待办...', text: this.newTodoContent }).layoutWeight(1).height(46).backgroundColor(ColorPalette.inputBg).borderRadius(23).placeholderColor(ColorPalette.textSecondary).padding({left: 16, right: 16}).onChange((val) => this.newTodoContent = val).onSubmit(() => this.addTodo())
+          TextInput({ placeholder: '添加新任务...', text: this.newTodoContent }).layoutWeight(1).height(46).backgroundColor(ColorPalette.inputBg).borderRadius(23).placeholderColor(ColorPalette.textSecondary).padding({left: 16, right: 16}).onChange((val) => this.newTodoContent = val).onSubmit(() => this.addTodo())
 
           Button({type: ButtonType.Circle}) {
             SymbolGlyph($r('sys.symbol.arrow_up'))
@@ -850,7 +802,7 @@ struct ClassRecorderApp {
       }
     }.padding(28).width('100%').height('100%').backgroundColor(ColorPalette.cardBackground).borderRadius({ topLeft: 32, topRight: 32 })
   }
-  // ... (其余部分保持不变) ...
+
   @Builder StudentsView() {
     Stack() {
       Column().width('100%').height('100%').backgroundColor(ColorPalette.background)
@@ -889,17 +841,14 @@ struct ClassRecorderApp {
         Stack({ alignContent: Alignment.Center }) { Progress({ value: this.calculateProgress(), total: 100, type: ProgressType.Ring }).color(ColorPalette.primary).backgroundColor(ColorPalette.inputBg).style({ strokeWidth: 8 }).width(60).height(60); Text(`${this.calculateProgress()}%`).fontSize(14).fontWeight(FontWeight.Bold).fontColor(ColorPalette.textPrimary) }
       }.width('100%').alignItems(VerticalAlign.Center).justifyContent(FlexAlign.SpaceBetween).padding({ left: 24, right: 24, top: 56, bottom: 24 })
 
-      // [修复] 移除 ListItem 嵌套
       List({ space: 12 }) {
         ForEach(this.getIncompleteTasks(formatDate(this.selectedDate)), (task: TodoTask) => {
-          // 直接调用 TodoItem
           TodoItem({ task: task, onDelete: () => { this.deleteTask(task.id); }, onToggle: () => { this.toggleTask(task.id); } })
         }, (item: TodoTask) => item.id.toString())
 
         if (this.getCompletedTasks(formatDate(this.selectedDate)).length > 0) {
           ListItem() { Text('已完成').fontSize(14).fontColor(ColorPalette.textSecondary).fontWeight(FontWeight.Bold).margin({ top: 16, bottom: 8 }) }
           ForEach(this.getCompletedTasks(formatDate(this.selectedDate)), (task: TodoTask) => {
-            // 直接调用 TodoItem
             TodoItem({ task: task, onDelete: () => { this.deleteTask(task.id); }, onToggle: () => { this.toggleTask(task.id); } })
           }, (item: TodoTask) => item.id.toString())
         }

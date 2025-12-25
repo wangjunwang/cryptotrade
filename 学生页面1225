@@ -1,0 +1,1071 @@
+import { dbHelper, Student, CourseRecord, AttendanceStat, ChapterStat } from '../db/DBHelper';
+import { common } from '@kit.AbilityKit';
+import { promptAction, curves } from '@kit.ArkUI';
+import fs from '@ohos.file.fs';
+import picker from '@ohos.file.picker';
+import { systemShare } from '@kit.ShareKit';
+import { uniformTypeDescriptor } from '@kit.ArkData';
+import fileUri from '@ohos.file.fileuri';
+import { motion } from '@kit.MultimodalAwarenessKit';
+import { Theme } from './AppTheme';
+
+// 分组数据接口
+interface GroupInfo {
+  name: string;
+  count: number;
+}
+
+// =======================
+// [自定义组件] 学生列表项卡片
+// =======================
+@Component
+struct StudentItemCard {
+  @Prop student: Student
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  onProfileClick: () => void = () => {}
+  onTopUpClick: () => void = () => {}
+  onDeleteClick: () => void = () => {}
+
+  @Builder SwipeMenu() {
+    Row() {
+      Button({ type: ButtonType.Circle }) {
+        SymbolGlyph($r('sys.symbol.trash'))
+          .fontSize(22)
+          .fontColor([Color.White])
+      }
+      .width(40)
+      .height(40)
+      .backgroundColor('#FF4040')
+      .shadow({ radius: 5, color: '#33FF0000', offsetY: 2 })
+      .onClick(() => {
+        this.onDeleteClick()
+      })
+    }
+    .width(75)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+  }
+
+  build() {
+    ListItem() {
+      Row() {
+        Row() {
+          Text(this.student.name.substring(0, 1))
+            .fontSize(18).fontWeight(FontWeight.Bold).fontColor(Color.White)
+            .width(40).height(40).textAlign(TextAlign.Center)
+            .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+            .borderRadius(20).margin({ right: 15 })
+
+          Column() {
+            Text(this.student.name).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            Text(`剩余: ${this.student.totalCredits - this.student.usedCredits} 课时`).fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 4 })
+          }.alignItems(HorizontalAlign.Start)
+        }
+        .layoutWeight(1).onClick(() => { this.onProfileClick() })
+
+        Text('充值')
+          .fontSize(12).fontWeight(FontWeight.Medium).fontColor(Color.White)
+          .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+          .padding({ left: 12, right: 12, top: 6, bottom: 6 }).borderRadius(16).margin({ left: 10 })
+          .onClick(() => { this.onTopUpClick() })
+      }
+      .width('100%')
+      .padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+      .borderRadius(16)
+      .shadow({ radius: 8, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.08)', offsetY: 3 })
+      .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+      .stateStyles({
+        pressed: { .scale({ x: 0.98, y: 0.98 }) },
+        normal: { .scale({ x: 1.0, y: 1.0 }) }
+      })
+    }
+    .width('100%')
+    .swipeAction({ end: this.SwipeMenu() })
+  }
+}
+
+// =======================
+// [组件] 学生档案详情弹窗
+// =======================
+@CustomDialog
+struct StudentProfileDialog {
+  controller: CustomDialogController
+  student: Student = {} as Student
+
+  @State attendance: AttendanceStat = { total: 0, finished: 0, leave: 0 }
+  @State chapterStats: ChapterStat[] = []
+  @State recentCourses: CourseRecord[] = []
+  @State activeChapterIndex: number = -1
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  onUpdate: () => void = () => {}
+  onViewHistory: () => void = () => {}
+
+  exportController: CustomDialogController | null = null
+
+  async aboutToAppear() {
+    const results = await Promise.all([
+      dbHelper.getStudentAttendanceStats(this.student.id),
+      dbHelper.getStudentChapterStats(this.student.id),
+      dbHelper.getStudentRecentCourses(this.student.id)
+    ]);
+
+    this.attendance = results[0];
+    this.chapterStats = results[1];
+    this.recentCourses = results[2];
+  }
+
+  formatDate(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+  }
+
+  generateProfileCSV(): string {
+    let content = '\uFEFF';
+    const remaining = this.student.totalCredits - this.student.usedCredits;
+    content += `=== 学员档案: ${this.student.name} ===\n`;
+    content += `分组,${this.student.groupName || '默认'}\n`;
+    content += `总充值,${this.student.totalCredits}\n剩余课时,${remaining}\n`;
+    content += `出勤统计,实消 ${this.attendance.finished} 节 / 请假 ${this.attendance.leave} 次\n\n`;
+    content += `=== 知识点掌握情况 ===\n`;
+    content += `章节,进度,已掌握,未掌握\n`;
+    if (this.chapterStats.length > 0) {
+      this.chapterStats.forEach(stat => {
+        const masteredStr = stat.masteredPoints.join(';');
+        const unmasteredStr = stat.unmasteredPoints.join(';');
+        content += `${stat.chapterName},${stat.progress.toFixed(0)}%,${masteredStr},${unmasteredStr}\n`;
+      });
+    } else {
+      content += `暂无数据,,,\n`;
+    }
+    content += `\n=== 最近上课记录 (Top 5) ===\n`;
+    content += `日期,状态,备注\n`;
+    this.recentCourses.forEach(r => {
+      const time = this.formatDate(r.date);
+      let statusStr = r.status === 2 ? '请假' : (r.isFinished ? '已消课' : '待上课');
+      const note = (r.note || '').replace(/,/g, '，').replace(/\n/g, ' ');
+      content += `${time},${statusStr},${note}\n`;
+    });
+    return content;
+  }
+
+  openExportPanel() {
+    this.exportController = new CustomDialogController({
+      builder: ExportPanel({
+        onSelect: async (type) => {
+          const csvContent = this.generateProfileCSV();
+          if (type === 'save') await this.saveToLocalDevice(csvContent);
+          else await this.shareToSystem(csvContent);
+        }
+      }),
+      alignment: DialogAlignment.Bottom,
+      customStyle: true,
+      autoCancel: true
+    });
+    this.exportController.open();
+  }
+
+  async saveToLocalDevice(content: string) {
+    try {
+      const saveOptions = new picker.DocumentSaveOptions();
+      saveOptions.newFileNames = [`${this.student.name}_档案_${Date.now()}.csv`];
+      const documentViewPicker = new picker.DocumentViewPicker();
+      const documentSaveResult = await documentViewPicker.save(saveOptions);
+      if (documentSaveResult && documentSaveResult.length > 0) {
+        const uri = documentSaveResult[0];
+        const file = fs.openSync(uri, fs.OpenMode.WRITE_ONLY | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+        fs.writeSync(file.fd, content);
+        fs.closeSync(file);
+        promptAction.showToast({ message: '已保存到文件管理' });
+      }
+    } catch (error) {
+      promptAction.showToast({ message: '取消保存' });
+    }
+  }
+
+  async shareToSystem(content: string) {
+    try {
+      let context = getContext(this) as common.UIAbilityContext;
+      const fileName = `${this.student.name}_档案.csv`;
+      const filePath = `${context.cacheDir}/${fileName}`;
+      const file = fs.openSync(filePath, fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      fs.writeSync(file.fd, content);
+      fs.closeSync(file);
+      const uri = fileUri.getUriFromPath(filePath);
+      const sharedData = new systemShare.SharedData({ utd: uniformTypeDescriptor.UniformDataType.FILE, uri: uri, title: fileName, content: content });
+      sharedData.addRecord({ utd: uniformTypeDescriptor.UniformDataType.FILE, uri: uri, title: fileName });
+      const controller = new systemShare.ShareController(sharedData);
+      await controller.show(context, { previewMode: 0, selectionMode: 0 });
+    } catch (error) {
+      promptAction.showToast({ message: '分享失败' });
+    }
+  }
+
+  @Builder ChapterDetailPopup(stat: ChapterStat) {
+    Column() {
+      Row() {
+        Text(stat.chapterName).fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        Blank()
+        if (stat.progress === 100) {
+          SymbolGlyph($r('sys.symbol.star_fill')).fontSize(16).fontColor(['#FFD700']).margin({right:4})
+        }
+        Text(`${stat.progress.toFixed(0)}%`).fontSize(14).fontColor(Theme.getStyle(this.themeName).accent as ResourceColor).fontWeight(FontWeight.Bold)
+      }.width('100%').margin({bottom: 12})
+
+      if (stat.masteredPoints.length > 0) {
+        Row() {
+          Circle({width:6, height:6}).fill('#00AA00').margin({right:6})
+          Text(`已掌握 (${stat.masteredPoints.length})`).fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+        }.width('100%').margin({bottom: 6})
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(stat.masteredPoints, (p: string) => {
+            Text(p).fontSize(11).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+              .padding({left:8, right:8, top:4, bottom:4})
+              .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg).borderRadius(4)
+              .margin({right:6, bottom:6})
+          })
+        }.margin({bottom: 12})
+      }
+
+      if (stat.unmasteredPoints.length > 0) {
+        Row() {
+          Circle({width:6, height:6}).fill('#FF9900').margin({right:6})
+          Text(`未掌握 (${stat.unmasteredPoints.length})`).fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+        }.width('100%').margin({bottom: 6})
+
+        Flex({ wrap: FlexWrap.Wrap }) {
+          ForEach(stat.unmasteredPoints, (p: string) => {
+            Text(p).fontSize(11).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+              .padding({left:8, right:8, top:4, bottom:4})
+              .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg).borderRadius(4)
+              .margin({right:6, bottom:6})
+          })
+        }
+      }
+    }
+    .padding(16)
+    .width(280)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius(12)
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.15)', offsetY: 5 })
+  }
+
+  build() {
+    Column() {
+      // 1. 顶部导航
+      Row() {
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(24).fontColor([this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary])
+        }
+        .width(40).height(40).backgroundColor(Color.Transparent)
+        .onClick(() => { this.controller.close() })
+
+        Blank()
+
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.share')).fontSize(22).fontColor([Theme.getStyle(this.themeName).accent as ResourceColor])
+        }
+        .width(40).height(40).backgroundColor(Theme.getStyle(this.themeName).accentLight as ResourceColor).margin({ right: 10 })
+        .onClick(() => { this.openExportPanel() })
+
+        Button('历史')
+          .fontSize(12).height(28)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+          .onClick(() => {
+            this.controller.close();
+            this.onViewHistory();
+          })
+      }
+      .width('100%')
+      .padding({ left: 10, right: 10, bottom: 5, top: 48 })
+
+      Scroll() {
+        Column({ space: 15 }) {
+
+          // 2. 核心概览
+          Column() {
+            Row() {
+              Text(this.student.name.substring(0, 1))
+                .fontSize(30).fontWeight(FontWeight.Bold).fontColor(Color.White)
+                .width(60).height(60).textAlign(TextAlign.Center)
+                .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor).borderRadius(30).margin({ right: 15 })
+
+              Column({ space: 6 }) {
+                Text(this.student.name).fontSize(22).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+                Text(this.student.groupName || '默认分组')
+                  .fontSize(12)
+                  .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                  .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                  .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+                  .borderRadius(20)
+              }.alignItems(HorizontalAlign.Start)
+            }
+            .width('100%').padding({ top: 5, bottom: 20 })
+
+            Row() {
+              Column() {
+                Text((this.student.totalCredits - this.student.usedCredits).toString())
+                  .fontSize(24)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+                Text('剩余课时').fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({top: 4})
+              }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+
+              Divider().vertical(true).height(30).color(this.isDarkMode ? Theme.colors.dark.divider : Theme.colors.light.divider)
+
+              Column() {
+                Text(this.attendance.finished.toString()).fontSize(24).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+                Text('累计上课').fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({top: 4})
+              }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+
+              Divider().vertical(true).height(30).color(this.isDarkMode ? Theme.colors.dark.divider : Theme.colors.light.divider)
+
+              Column() {
+                Text(this.attendance.leave.toString()).fontSize(24).fontWeight(FontWeight.Bold).fontColor('#FF9900')
+                Text('请假次数').fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({top: 4})
+              }.layoutWeight(1).alignItems(HorizontalAlign.Center)
+            }.width('100%').padding({ bottom: 10 })
+          }
+          .width('100%').padding(20)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+          .borderRadius(20)
+          .shadow({ radius: 10, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.08)', offsetY: 5 })
+          .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+
+          // 3. 知识点掌握
+          Column() {
+            Row() {
+              Text('知识点掌握情况').fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            }.width('100%').margin({ bottom: 15 })
+
+            if (this.chapterStats.length > 0) {
+              List({ space: 12 }) {
+                ForEach(this.chapterStats, (item: ChapterStat, index: number) => {
+                  ListItem() {
+                    Column() {
+                      Row() {
+                        Text(item.chapterName)
+                          .fontSize(14).fontWeight(FontWeight.Medium).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+                          .maxLines(1).textOverflow({overflow: TextOverflow.Ellipsis})
+                          .layoutWeight(1)
+
+                        Text(`${item.masteredCount}/${item.totalCount}`)
+                          .fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ right: 8 })
+
+                        Text(`${item.progress.toFixed(0)}%`)
+                          .fontSize(12)
+                          .fontWeight(FontWeight.Bold)
+                          .fontColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+                      }.width('100%').margin({ bottom: 8 })
+
+                      Progress({ value: item.masteredCount, total: item.totalCount, type: ProgressType.Linear })
+                        .color(Theme.getStyle(this.themeName).accent as ResourceColor)
+                        .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                        .style({ strokeWidth: 8 })
+                        .width('100%')
+                    }
+                    .width('100%')
+                    .padding({ top: 4, bottom: 4 })
+                    .onClick(() => {
+                      this.activeChapterIndex = this.activeChapterIndex === index ? -1 : index;
+                    })
+                    .bindPopup(this.activeChapterIndex === index, {
+                      builder: this.ChapterDetailPopup(item),
+                      placement: Placement.Top,
+                      mask: false,
+                      onStateChange: (e) => {
+                        if (!e.isVisible) this.activeChapterIndex = -1;
+                      }
+                    })
+                  }
+                })
+              }
+            } else {
+              Column() {
+                Text('暂无掌握数据').fontSize(14).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                Text('在首页"课后分析"中勾选后显示').fontSize(10).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).opacity(0.6).margin({top:4})
+              }.width('100%').height(80).justifyContent(FlexAlign.Center)
+            }
+          }
+          .width('100%').padding(20)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+          .borderRadius(20)
+          .shadow({ radius: 10, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.08)', offsetY: 5 })
+          .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+
+          // 4. 最近动态
+          Column() {
+            Row() {
+              Text('最近动态').fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            }.width('100%').margin({ bottom: 5 })
+
+            if (this.recentCourses.length > 0) {
+              Column({ space: 10 }) {
+                ForEach(this.recentCourses, (c: CourseRecord, index: number) => {
+                  Row() {
+                    Divider()
+                      .vertical(true)
+                      .height(20)
+                      .color(c.status === 2 ? '#FF9900' : (c.isFinished ? '#00AA00' : Theme.getStyle(this.themeName).accent as ResourceColor))
+                      .strokeWidth(3)
+                      .margin({ right: 10, top: 4 })
+
+                    Column() {
+                      Row() {
+                        Text(this.formatDate(c.date)).fontSize(14).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+                        Blank()
+
+                        if (c.status === 2) Text('请假').fontSize(10).fontColor('#FF9900').backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg).padding({left:6, right:6, top:2, bottom:2}).borderRadius(4)
+                        else if (c.isFinished) Text('已消课').fontSize(10).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg).padding({left:6, right:6, top:2, bottom:2}).borderRadius(4)
+                        else Text('待上课').fontSize(10).fontColor(Theme.getStyle(this.themeName).accent as ResourceColor).backgroundColor(Theme.getStyle(this.themeName).accentLight as ResourceColor).padding({left:6, right:6, top:2, bottom:2}).borderRadius(4)
+                      }.width('100%').margin({ bottom: 6 })
+
+                      Text(c.note || '无备注').fontSize(13)
+                        .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                        .maxLines(1).textOverflow({overflow: TextOverflow.Ellipsis})
+                    }
+                    .layoutWeight(1)
+                  }
+                  .width('100%')
+                  .padding(12)
+                  .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                  .borderRadius(12)
+                  .alignItems(VerticalAlign.Top)
+                })
+              }
+            } else {
+              Text('暂无上课记录').fontSize(12)
+                .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                .width('100%').textAlign(TextAlign.Center).padding(10)
+            }
+          }
+          .width('100%').padding(20)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+          .borderRadius(20)
+
+        }.padding({ left: 15, right: 15, bottom: 30 })
+      }.layoutWeight(1)
+    }
+    .width('100%').height('100%')
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+  }
+}
+
+// =======================
+// [组件] 导出弹窗
+// =======================
+@CustomDialog
+struct ExportPanel {
+  controller: CustomDialogController
+  onSelect: (type: 'save' | 'share') => void = () => {}
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  build() {
+    Column() {
+      Text('选择导出方式').fontSize(18).fontWeight(FontWeight.Bold)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        .margin({ top: 15, bottom: 20 })
+      Row() {
+        SymbolGlyph($r('sys.symbol.save')).fontSize(24).fontColor([Theme.getStyle(this.themeName).accent as ResourceColor]).margin({ right: 15 })
+        Column() {
+          Text('保存到文件').fontSize(16).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary).fontWeight(FontWeight.Medium)
+          Text('存储到手机目录，可连接电脑查看').fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 2 })
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(20).fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary])
+      }
+      .width('100%').padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12)
+      .onClick(() => { this.onSelect('save'); if(this.controller) this.controller.close(); })
+
+      Row() {
+        SymbolGlyph($r('sys.symbol.paperplane')).fontSize(24).fontColor(['#00AA00']).margin({ right: 15 })
+        Column() {
+          Text('发送给好友').fontSize(16).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary).fontWeight(FontWeight.Medium)
+          Text('通过微信、QQ、华为分享发送').fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 2 })
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(20).fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary])
+      }
+      .width('100%').padding(15).margin({ top: 10 })
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12)
+      .onClick(() => { this.onSelect('share'); if(this.controller) this.controller.close(); })
+
+      Button('取消').width('100%').height(45).fontSize(16).backgroundColor(Color.Transparent)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+        .margin({ top: 15 })
+        .onClick(() => { if(this.controller) this.controller.close() })
+    }
+    .padding(20)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius({ topLeft: 24, topRight: 24, bottomLeft: 0, bottomRight: 0 }).width('100%')
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.1)', offsetY: -5 })
+  }
+}
+
+// =======================
+// [组件] 添加/编辑学生弹窗
+// =======================
+@CustomDialog
+struct AddStudentDialog {
+  controller: CustomDialogController
+  confirm: (name: string, credits: number, groupName: string) => void = () => {}
+  @State name: string = ''
+  @State credits: string = ''
+  @State groupName: string = ''
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  build() {
+    Column() {
+      Text('新学生档案').fontSize(20).fontWeight(FontWeight.Bold)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        .width('100%').textAlign(TextAlign.Start).margin({ top: 10, bottom: 20 })
+
+      Row() {
+        SymbolGlyph($r('sys.symbol.person')).fontSize(24).fontColor([Theme.getStyle(this.themeName).accent as ResourceColor]).margin({ right: 15 })
+        TextInput({ placeholder: '输入学生姓名', text: this.name }).onChange(v => this.name = v).layoutWeight(1).backgroundColor(Color.Transparent).height(40)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+      }.padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12).width('100%')
+
+      Row() {
+        SymbolGlyph($r('sys.symbol.folder')).fontSize(24).fontColor(['#9900FF']).margin({ right: 15 })
+        TextInput({ placeholder: '分组名称 (例如: 钢琴班)', text: this.groupName }).onChange(v => this.groupName = v).layoutWeight(1).backgroundColor(Color.Transparent).height(40)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+      }.padding(15).margin({ top: 10 })
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12).width('100%')
+
+      Row() {
+        SymbolGlyph($r('sys.symbol.clock')).fontSize(24).fontColor(['#FF9900']).margin({ right: 15 })
+        TextInput({ placeholder: '初始课时 (默认为0)', text: this.credits }).type(InputType.Number).onChange(v => this.credits = v).layoutWeight(1).backgroundColor(Color.Transparent).height(40)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+      }.padding(15).margin({ top: 10 })
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12).width('100%')
+
+      Row({ space: 15 }) {
+        Button('取消').layoutWeight(1)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+          .onClick(() => { if(this.controller) this.controller.close() })
+
+        Button('保存档案').layoutWeight(2)
+          .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+          .fontColor(Color.White)
+          .onClick(() => {
+            if (this.name) {
+              const val = this.credits ? parseInt(this.credits) : 0;
+              const group = this.groupName.trim() ? this.groupName.trim() : '默认分组';
+              this.confirm(this.name, val, group);
+              if(this.controller) this.controller.close();
+            }
+          })
+      }.width('100%').margin({ top: 25 })
+    }
+    .padding(25)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius({ topLeft: 24, topRight: 24, bottomLeft: 0, bottomRight: 0 }).width('100%')
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.1)', offsetY: -5 })
+  }
+}
+
+// =======================
+// [组件] 充值弹窗
+// =======================
+@CustomDialog
+struct TopUpDialog {
+  controller: CustomDialogController
+  studentName: string = ''
+  confirm: (amount: number) => void = () => {}
+  @State amount: string = ''
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  build() {
+    Column() {
+      Text(`课时充值`).fontSize(20).fontWeight(FontWeight.Bold)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        .width('100%').textAlign(TextAlign.Start).margin({ top: 10, bottom: 5 })
+      Text(`为 ${this.studentName} 增加课时`).fontSize(14)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+        .width('100%').textAlign(TextAlign.Start).margin({ bottom: 20 })
+
+      Row() {
+        SymbolGlyph($r('sys.symbol.plus_circle')).fontSize(24).fontColor(['#00AA00']).margin({ right: 15 })
+        TextInput({ placeholder: '输入充值数量', text: this.amount }).type(InputType.Number).onChange(v => this.amount = v).layoutWeight(1).backgroundColor(Color.Transparent).height(40)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+      }.padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+      .borderRadius(12).width('100%')
+
+      Row({ space: 15 }) {
+        Button('取消').layoutWeight(1)
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+          .onClick(() => { if(this.controller) this.controller.close() })
+
+        Button('确认充值').layoutWeight(2)
+          .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+          .fontColor(Color.White)
+          .onClick(() => {
+            const val = parseInt(this.amount);
+            if (val > 0) {
+              this.confirm(val); // 【核心修复】确认充值
+              if(this.controller) this.controller.close();
+            }
+          })
+      }.width('100%').margin({ top: 25 })
+    }
+    .padding(25)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius({ topLeft: 24, topRight: 24, bottomLeft: 0, bottomRight: 0 }).width('100%')
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.1)', offsetY: -5 })
+  }
+}
+
+// =======================
+// [组件] 历史记录弹窗
+// =======================
+@CustomDialog
+struct HistoryDialog {
+  controller: CustomDialogController
+  studentId: number = 0
+  studentName: string = ''
+  totalCredits: number = 0
+  usedCredits: number = 0
+  @State records: CourseRecord[] = []
+  @State stats: AttendanceStat = { total: 0, finished: 0, leave: 0 };
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  async aboutToAppear() {
+    this.records = await dbHelper.getStudentCourses(this.studentId);
+    this.stats = await dbHelper.getStudentAttendanceStats(this.studentId);
+  }
+
+  formatTime(timestamp: number): string {
+    const d = new Date(timestamp);
+    return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+  }
+
+  build() {
+    Column() {
+      Row() {
+        Text(`${this.studentName} 的完整记录`).fontSize(20).fontWeight(FontWeight.Bold)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        Blank()
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.xmark')).fontSize(20)
+            .fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary])
+        }
+        .width(36).height(36)
+        .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+        .onClick(() => { if(this.controller) this.controller.close() })
+      }.width('100%').margin({ top: 10, bottom: 15 })
+
+      if (this.records.length === 0) {
+        Column() { Text('暂无上课记录').fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).fontSize(14) }.width('100%').height(150).justifyContent(FlexAlign.Center)
+      } else {
+        List({ space: 10 }) {
+          ForEach(this.records, (item: CourseRecord) => {
+            ListItem() {
+              Row() {
+                Column() {
+                  Text(this.formatTime(item.date)).fontSize(14)
+                    .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+                    .fontWeight(FontWeight.Medium);
+                  if(item.note){
+                    Text(item.note).fontSize(12)
+                      .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                      .margin({ top: 4 })
+                  }
+                }.alignItems(HorizontalAlign.Start).layoutWeight(1);
+
+                if (item.status === 2) {
+                  Text('请假').fontSize(12).fontColor('#FF9900')
+                    .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                    .padding(4).borderRadius(4)
+                } else if (item.isFinished) {
+                  Text('已消').fontSize(12).fontColor('#00AA00')
+                    .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                    .padding(4).borderRadius(4)
+                } else if (item.status === 3) {
+                  Text('已调').fontSize(12).fontColor('#9900FF')
+                    .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                    .padding(4).borderRadius(4)
+                } else {
+                  Text('待消').fontSize(12)
+                    .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                    .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+                    .padding(4).borderRadius(4)
+                }
+              }.width('100%').padding(15)
+              .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+              .borderRadius(8)
+            }
+          })
+        }.width('100%').height(300).scrollBar(BarState.Off)
+      }
+    }
+    .padding(25)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius(16)
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.1)', offsetY: 10 })
+    .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+  }
+}
+
+// =========================================================
+// 7. [主页面] 学生管理列表
+// =========================================================
+@Entry
+@Component
+export struct StudentPage {
+  @State allStudents: Student[] = []
+  @State groupList: GroupInfo[] = []
+  @State floatingButtonScale: number = 1.0;
+
+  // 【核心修复】引入 NavPathStack 管理页面
+  @State pageStack: NavPathStack = new NavPathStack();
+
+  @StorageProp('AppGlobalUpdate') @Watch('refreshData') updateSignal: number = 0;
+  @StorageLink('GlobalShortcutAction') @Watch('onShortcutTrigger') shortcutAction: string = '';
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  addController: CustomDialogController | null = null
+  topUpController: CustomDialogController | null = null
+  historyController: CustomDialogController | null = null
+  profileController: CustomDialogController | null = null
+
+  @State isRightHand: boolean = true
+  @State opacityValue: number = 1;
+  @State offsetX: number = 0;
+  private motionTimerId: number = -1;
+  private readonly DEBOUNCE_DELAY: number = 200;
+
+  async aboutToAppear() {
+    let context = getContext(this) as common.UIAbilityContext;
+    await dbHelper.initDB(context);
+    this.refreshData();
+    this.startMotion();
+    this.onShortcutTrigger();
+  }
+
+  aboutToDisappear() {
+    this.stopMotion();
+  }
+
+  onPageShow() { this.refreshData(); this.onShortcutTrigger(); }
+
+  onShortcutTrigger() {
+    if (this.shortcutAction === 'action_add_student') {
+      setTimeout(() => {
+        this.openAddStudent();
+        AppStorage.setOrCreate('GlobalShortcutAction', '');
+      }, 200);
+    }
+  }
+
+  startMotion() {
+    try {
+      motion.on('holdingHandChanged', (data: number) => {
+        let targetIsRightHand: boolean = (data === 2);
+        if (targetIsRightHand !== this.isRightHand) {
+          if (this.motionTimerId !== -1) clearTimeout(this.motionTimerId);
+          this.motionTimerId = setTimeout(() => {
+            let exitOffsetX = this.isRightHand ? 200 : -200;
+            animateTo({ duration: 250, curve: Curve.EaseIn, onFinish: () => {
+              this.isRightHand = targetIsRightHand;
+              this.offsetX = targetIsRightHand ? 200 : -200;
+              animateTo({ curve: curves.springCurve(0, 1, 228, 30) }, () => {
+                this.offsetX = 0;
+                this.opacityValue = 1;
+              });
+            } }, () => {
+              this.offsetX = exitOffsetX;
+              this.opacityValue = 0;
+            });
+            this.motionTimerId = -1;
+          }, this.DEBOUNCE_DELAY);
+        } else {
+          if (this.motionTimerId !== -1) {
+            clearTimeout(this.motionTimerId);
+            this.motionTimerId = -1;
+          }
+        }
+      });
+    } catch (err) {}
+  }
+
+  stopMotion() {
+    try {
+      motion.off('holdingHandChanged');
+      if (this.motionTimerId !== -1) clearTimeout(this.motionTimerId);
+    } catch (err) {}
+  }
+
+  processGroups() {
+    const groups: Map<string, number> = new Map();
+    this.allStudents.forEach(stu => {
+      const gName = stu.groupName || '默认分组';
+      const count = groups.get(gName) || 0;
+      groups.set(gName, count + 1);
+    });
+
+    const result: GroupInfo[] = [];
+    groups.forEach((count, name) => {
+      result.push({ name: name, count: count });
+    });
+
+    this.groupList = result.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async refreshData() {
+    this.allStudents = await dbHelper.getStudents();
+    this.processGroups();
+  }
+
+  openAddStudent() {
+    this.addController = new CustomDialogController({
+      builder: AddStudentDialog({
+        confirm: async (name, credits, groupName) => {
+          await dbHelper.addStudent(name, credits, groupName);
+          this.refreshData(); // 刷新列表
+        }
+      }),
+      alignment: DialogAlignment.Bottom,
+      customStyle: true,
+      autoCancel: true
+    });
+    this.addController.open();
+  }
+
+  openTopUp(stu: Student) {
+    this.topUpController = new CustomDialogController({
+      builder: TopUpDialog({
+        studentName: stu.name,
+        confirm: async (amount) => {
+          await dbHelper.topUpCredits(stu.id, amount);
+          this.refreshData(); // 【核心修复】充值后立即刷新
+        }
+      }),
+      alignment: DialogAlignment.Bottom,
+      customStyle: true,
+      autoCancel: true
+    });
+    this.topUpController.open();
+  }
+
+  openProfile(stu: Student) {
+    this.profileController = new CustomDialogController({
+      builder: StudentProfileDialog({
+        student: stu,
+        onUpdate: () => { this.refreshData(); },
+        onViewHistory: () => { this.openHistory(stu); }
+      }),
+      alignment: DialogAlignment.Bottom,
+      customStyle: true,
+      autoCancel: true
+    });
+    this.profileController.open();
+  }
+
+  openHistory(stu: Student) {
+    this.historyController = new CustomDialogController({
+      builder: HistoryDialog({
+        studentId: stu.id,
+        studentName: stu.name,
+        totalCredits: stu.totalCredits,
+        usedCredits: stu.usedCredits
+      }),
+      alignment: DialogAlignment.Bottom,
+      customStyle: true,
+      autoCancel: true
+    });
+    this.historyController.open();
+  }
+
+  deleteStudent(id: number) {
+    AlertDialog.show({
+      title: '删除确认',
+      message: '确定要删除这位学员的档案吗？\n删除后不可恢复。',
+      autoCancel: true,
+      alignment: DialogAlignment.Bottom,
+      offset: { dx: 0, dy: -20 },
+      primaryButton: {
+        value: '取消',
+        fontColor: this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary,
+        action: () => {}
+      },
+      secondaryButton: {
+        value: '确认删除',
+        fontColor: Color.Red,
+        action: async () => {
+          animateTo({ duration: 300, curve: Curve.EaseOut }, () => {
+            this.allStudents = this.allStudents.filter(s => s.id !== id);
+          });
+          await dbHelper.deleteStudent(id);
+          setTimeout(() => { this.refreshData(); }, 300);
+          promptAction.showToast({ message: '已删除' });
+        }
+      }
+    });
+  }
+
+  // 【核心修复】路由构建器，处理页面跳转逻辑
+  @Builder StudentListBuilder(name: string, param: Object) {
+    NavDestination() {
+      Column() {
+        // 标题栏
+        Row() {
+          Button({ type: ButtonType.Circle }) {
+            SymbolGlyph($r('sys.symbol.chevron_left')).fontSize(24).fontColor([this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary])
+          }
+          .backgroundColor(Color.Transparent).width(40).height(40).margin({ right: 5 })
+          .onClick(() => {
+            this.pageStack.pop(); // 返回上一级
+          })
+
+          Text(param as string) // 【修复】使用 param 显示正确分组名
+            .fontSize(24).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            .layoutWeight(1).textAlign(TextAlign.Start)
+        }
+        // 【核心修复】顶部Padding，解决遮挡问题
+        .width('100%').padding({ top: 40, bottom: 10, left: 15, right: 15 })
+
+        // 学生列表
+        List({ space: 12 }) {
+          ForEach(
+            this.allStudents.filter(s => (s.groupName || '默认分组') === (param as string)), // 【修复】使用 param 过滤
+            (stu: Student) => {
+              StudentItemCard({
+                student: stu,
+                onProfileClick: () => { this.openProfile(stu) },
+                onTopUpClick: () => { this.openTopUp(stu) },
+                onDeleteClick: () => { this.deleteStudent(stu.id) }
+              })
+            },
+            // 【核心修复】强制刷新 Key：使用 课时数 变化作为 Key，确保 UI 更新
+            (stu: Student) => `${stu.id}_${stu.totalCredits}_${stu.usedCredits}`
+          )
+          ListItem().height(80)
+        }
+        .width('100%').layoutWeight(1).padding({ left: 15, right: 15 }).scrollBar(BarState.Off)
+      }
+      .width('100%').height('100%')
+      // 【核心修复】给子页面加上背景色，解决重叠卡顿视觉问题
+      .linearGradient({ angle: 180, colors: this.isDarkMode ? Theme.colors.dark.bgGradient : Theme.colors.light.bgGradient })
+    }
+    .hideTitleBar(true) // 隐藏系统标题栏，使用自定义的
+    .backgroundColor(Color.Transparent)
+  }
+
+  @Builder GroupCardItem(group: GroupInfo) {
+    ListItem() {
+      Row() {
+        Row() {
+          SymbolGlyph($r('sys.symbol.folder_fill')).fontSize(22).fontColor([Theme.getStyle(this.themeName).accent as ResourceColor])
+        }
+        .width(40).height(40).backgroundColor(Theme.getStyle(this.themeName).accentLight as ResourceColor).borderRadius(12).justifyContent(FlexAlign.Center).margin({ right: 15 })
+
+        Column() {
+          Text(group.name).fontSize(16).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+          Text(`${group.count} 名学生`).fontSize(12).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 4 })
+        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+
+        SymbolGlyph($r('sys.symbol.chevron_right')).fontSize(20).fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary])
+      }
+      .width('100%')
+      .padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    }
+    .borderRadius(20)
+    .clip(true)
+    .margin({ bottom: 10 })
+    .onClick(() => {
+      // 【核心修复】点击分组，推入新页面，并传递分组名
+      this.pageStack.pushPath({ name: 'StudentList', param: group.name });
+    })
+    .stateStyles({
+      pressed: { .scale({ x: 0.98, y: 0.98 }).backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg) },
+      normal: { .scale({ x: 1.0, y: 1.0 }).backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card) }
+    })
+    .shadow({ radius: 8, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.08)', offsetY: 3 })
+    .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+  }
+
+  build() {
+    // 【核心修复】使用 Navigation 组件作为根容器
+    Navigation(this.pageStack) {
+      Column() {
+        // 标题栏
+        Row() {
+          Text("学生档案")
+            .fontSize(24).fontWeight(FontWeight.Bold).fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            .layoutWeight(1).textAlign(TextAlign.Center)
+        }
+        .width('100%').padding({ top: 56, bottom: 10, left: 15, right: 15 })
+        .backgroundColor('transparent')
+
+        // 内容区域
+        if (this.allStudents.length === 0) {
+          Column() {
+            SymbolGlyph($r('sys.symbol.person_crop_circle_fill_1')).fontSize(50).fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary]);
+            Text('还没有学生，快去添加吧').fontSize(14).fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 10 })
+          }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+        }
+        else {
+          List({ space: 0 }) { // 分组列表
+            ForEach(this.groupList, (group: GroupInfo) => { this.GroupCardItem(group) })
+            ListItem().height(80)
+          }
+          .width('100%').layoutWeight(1).padding({ left: 15, right: 15 }).scrollBar(BarState.Off)
+        }
+
+        // 悬浮按钮
+        Row() {
+          Button() {
+            Row() {
+              SymbolGlyph($r('sys.symbol.person_crop_circle_fill_1')).fontSize(24).fontColor([Color.White]).margin({ right: 8 });
+              Text('添加学生').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Color.White)
+            }
+          }
+          .height(50).padding({ left: 20, right: 20 })
+          .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor)
+          .borderRadius(25)
+          .shadow({ radius: 10, color: (Theme.getStyle(this.themeName).accent as string) + '40', offsetY: 5 })
+          .onClick(() => this.openAddStudent())
+          .stateStyles({
+            pressed: { .scale({ x: 0.95, y: 0.95 }) },
+            normal: { .scale({ x: 1.0, y: 1.0 }) }
+          })
+        }
+        .width('100%').position({ x: 0, y: '80%' })
+        .justifyContent(this.isRightHand ? FlexAlign.End : FlexAlign.Start)
+        .padding({ left: 20, right: 20 })
+        .translate({ x: this.offsetX })
+        .opacity(this.opacityValue)
+        .hitTestBehavior(HitTestMode.Transparent)
+
+      }
+      .width('100%').height('100%')
+    }
+    // 配置路由映射
+    .navDestination(this.StudentListBuilder)
+    .hideTitleBar(true) // 隐藏 Navigation 自带标题栏
+    .mode(NavigationMode.Stack)
+    .width('100%').height('100%')
+    .backgroundColor(Color.Transparent)
+  }
+}

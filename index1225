@@ -1,0 +1,61 @@
+// entry/src/main/ets/pages/Index.ets
+import { CalendarView } from './CalendarPage'; // 引用 CalendarView 组件
+import { common, ConfigurationConstant, Configuration } from '@kit.AbilityKit';
+import { window } from '@kit.ArkUI';
+import { dbHelper } from '../db/DBHelper';
+
+@Entry
+@Component
+struct Index {
+  @State isDarkMode: boolean = false;
+
+  async aboutToAppear() {
+    let context = getContext(this) as common.UIAbilityContext;
+    await dbHelper.initDB(context); // 初始化数据库
+    this.checkSystemMode();
+    this.updateStatusBar();
+  }
+
+  onPageShow() {
+    this.checkSystemMode();
+    this.updateStatusBar();
+  }
+
+  onConfigurationUpdate(newConfig: Configuration) {
+    this.isDarkMode = newConfig.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+    this.updateStatusBar();
+  }
+
+  checkSystemMode() {
+    let context = getContext(this) as common.UIAbilityContext;
+    this.isDarkMode = context.config.colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  }
+
+  updateStatusBar() {
+    try {
+      window.getLastWindow(getContext(this)).then((windowClass) => {
+        windowClass.setWindowLayoutFullScreen(true);
+        windowClass.setWindowSystemBarProperties({
+          statusBarColor: '#00FFFFFF',
+          isStatusBarLightIcon: !this.isDarkMode, // 浅色背景用深色图标
+          statusBarContentColor: this.isDarkMode ? '#FFFFFF' : '#000000',
+          navigationBarColor: '#00FFFFFF',
+          isNavigationBarLightIcon: this.isDarkMode,
+          navigationBarContentColor: this.isDarkMode ? '#FFFFFF' : '#000000'
+        });
+      });
+    } catch (err) {
+      console.error('状态栏设置失败: ' + JSON.stringify(err));
+    }
+  }
+
+  build() {
+    // 容器只负责加载 CalendarPage，由 CalendarPage 内部处理 Tab 切换
+    Column() {
+      CalendarView() // 使用组件
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.isDarkMode ? '#000000' : '#F2F3F5')
+  }
+}

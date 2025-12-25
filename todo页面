@@ -1,0 +1,460 @@
+import { dbHelper, TodoRecord } from '../db/DBHelper';
+import { common } from '@kit.AbilityKit';
+import { motion } from '@kit.MultimodalAwarenessKit';
+import { curves } from '@kit.ArkUI';
+import { NotificationHelper } from '../utils/NotificationHelper';
+import { Theme } from './AppTheme';
+
+// =======================
+// [自定义组件] 待办卡片
+// =======================
+@Component
+struct TodoItemCard {
+  @Prop item: TodoRecord
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  // 【新增】监听主题
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  onToggle: () => void = () => {}
+  onDelete: () => void = () => {}
+
+  @Builder SwipeMenu() {
+    Row() {
+      Column() {
+        SymbolGlyph($r('sys.symbol.trash'))
+          .fontSize(22)
+          .fontColor([Color.White])
+      }
+      .width(44).height(44)
+      .borderRadius(22)
+      .backgroundColor(Color.Red)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(HorizontalAlign.Center)
+      .shadow({ radius: 5, color: '#20FF0000', offsetY: 2 })
+      .onClick(() => { this.onDelete() })
+    }
+    .width(80).height('100%')
+    .justifyContent(FlexAlign.Center)
+  }
+
+  build() {
+    ListItem() {
+      Row() {
+        // 复选框区域
+        Stack({ alignContent: Alignment.Center }) {
+          Circle({ width: 24, height: 24 })
+            .fill(this.item.isFinished ? Theme.getStyle(this.themeName).accent as ResourceColor : 'transparent') // 【动态主题】
+            .stroke(this.item.isFinished ? Theme.getStyle(this.themeName).accent as ResourceColor : (this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary))
+            .strokeWidth(2)
+
+          if (this.item.isFinished) {
+            SymbolGlyph($r('sys.symbol.checkmark'))
+              .fontSize(14)
+              .fontColor([Color.White])
+          }
+        }
+        .width(30).height(30)
+        .alignContent(Alignment.Center)
+        .margin({ right: 15 })
+        .onClick(() => { this.onToggle() })
+
+        // 文本区域
+        Text(this.item.content)
+          .fontSize(16)
+          .fontColor(this.item.isFinished ?
+            (this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary) :
+            (this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary))
+          .decoration({
+            type: this.item.isFinished ? TextDecorationType.LineThrough : TextDecorationType.None,
+            color: this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary
+          })
+          .layoutWeight(1)
+          .maxLines(2)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+      }
+      .width('100%')
+      .padding(15)
+      .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+      .borderRadius(16)
+      // 使用中性阴影，避免颜色浑浊
+      .shadow({ radius: 8, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.08)', offsetY: 3 })
+      .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+    }
+    .onClick(() => { this.onToggle() })
+    .swipeAction({ end: this.SwipeMenu() })
+  }
+}
+
+// =======================
+// 1. 新建待办弹窗
+// =======================
+@CustomDialog
+struct AddTodoDialog {
+  controller: CustomDialogController
+  confirm: (content: string) => void = () => {}
+  @State content: string = ''
+  @State confirmButtonScale: number = 1.0;
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  // 【新增】
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  build() {
+    Column({ space: 20 }) {
+      Text('新建待办').fontSize(20).fontWeight(FontWeight.Bold)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        .width('100%').textAlign(TextAlign.Start).margin({ top: 10 })
+
+      TextInput({ placeholder: '要做什么？', text: this.content })
+        .onChange((v: string) => this.content = v)
+        .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+        .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+        .placeholderColor(this.isDarkMode ? Theme.colors.dark.placeholder : Theme.colors.light.placeholder)
+        .fontSize(16).height(50).borderRadius(8)
+
+      Row({ space: 20 }) {
+        Button('取消')
+          .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+          .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+          .fontSize(16).onClick(() => { if(this.controller) this.controller.close() }).layoutWeight(1)
+
+        Button('保存')
+          .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor) // 【动态主题】
+          .fontSize(16).onClick(() => { if (this.content) { this.confirm(this.content); if (this.controller) this.controller.close() } }).layoutWeight(1)
+          .scale({ x: this.confirmButtonScale, y: this.confirmButtonScale })
+          .onTouch((event: TouchEvent) => {
+            animateTo({ duration: 100 }, () => {
+              if (event.type === TouchType.Down) { this.confirmButtonScale = 0.9; }
+              else if (event.type === TouchType.Up) { this.confirmButtonScale = 1.0; }
+            });
+          })
+      }.width('100%')
+    }
+    .padding(25)
+    .backgroundColor(this.isDarkMode ? Theme.colors.dark.card : Theme.colors.light.card)
+    .borderRadius(16)
+    .shadow({ radius: 20, color: this.isDarkMode ? Theme.colors.dark.shadow : 'rgba(0,0,0,0.1)', offsetY: 10 })
+    .border({ width: 1, color: this.isDarkMode ? 'transparent' : 'rgba(0,0,0,0.05)' })
+  }
+}
+
+// =======================
+// 2. 待办清单主页面 (完整逻辑)
+// =======================
+@Entry
+@Component
+export struct TodoPage {
+  @State unfinishedList: TodoRecord[] = []
+  @State finishedList: TodoRecord[] = []
+  @State selectedDate: Date = new Date()
+  @State totalCount: number = 0
+  @State finishedCount: number = 0
+
+  @State isRightHand: boolean = true
+  @State opacityValue: number = 1;
+  @State offsetX: number = 0;
+
+  private motionTimerId: number = -1;
+  private readonly DEBOUNCE_DELAY: number = 200;
+
+  @StorageProp('AppGlobalUpdate') @Watch('refreshData') updateSignal: number = 0;
+  @StorageLink('GlobalShortcutAction') @Watch('onShortcutTrigger') shortcutAction: string = '';
+  @StorageLink('isDarkMode') isDarkMode: boolean = false;
+  // 【新增】
+  @StorageLink('GlobalThemeStyle') themeName: string = 'orange';
+
+  private isProcessingShortcut: boolean = false;
+
+  addController: CustomDialogController | null = null
+  @State floatingButtonScale: number = 1.0;
+
+  async aboutToAppear() {
+    let context = getContext(this) as common.UIAbilityContext;
+    await dbHelper.initDB(context);
+    this.refreshData();
+    this.startMotion();
+    this.onShortcutTrigger();
+  }
+
+  onPageShow() {
+    this.onShortcutTrigger();
+  }
+
+  aboutToDisappear() { this.stopMotion(); }
+
+  onShortcutTrigger() {
+    if (this.shortcutAction !== 'action_add_todo') return;
+    if (this.isProcessingShortcut) return;
+    this.isProcessingShortcut = true;
+    setTimeout(() => {
+      this.openAddTodo();
+      AppStorage.setOrCreate('GlobalShortcutAction', '');
+      this.isProcessingShortcut = false;
+    }, 200);
+  }
+
+  startMotion() {
+    try {
+      motion.on('holdingHandChanged', (data: number) => {
+        let targetIsRightHand: boolean = (data === 2);
+        if (targetIsRightHand !== this.isRightHand) {
+          if (this.motionTimerId !== -1) { clearTimeout(this.motionTimerId); }
+          this.motionTimerId = setTimeout(() => {
+            let exitOffsetX = this.isRightHand ? 200 : -200;
+            animateTo({ duration: 250, curve: Curve.EaseIn, onFinish: () => {
+              this.isRightHand = targetIsRightHand;
+              this.offsetX = targetIsRightHand ? 200 : -200;
+              animateTo({ curve: curves.springCurve(0, 1, 228, 30) }, () => {
+                this.offsetX = 0;
+                this.opacityValue = 1;
+              });
+            } }, () => {
+              this.offsetX = exitOffsetX;
+              this.opacityValue = 0;
+            });
+            this.motionTimerId = -1;
+          }, this.DEBOUNCE_DELAY);
+        } else {
+          if (this.motionTimerId !== -1) { clearTimeout(this.motionTimerId); this.motionTimerId = -1; }
+        }
+      });
+    } catch (err) {
+      console.error('Motion 监听失败: ' + JSON.stringify(err));
+    }
+  }
+
+  stopMotion() {
+    try {
+      motion.off('holdingHandChanged');
+      if (this.motionTimerId !== -1) { clearTimeout(this.motionTimerId); }
+    } catch (err) {}
+  }
+
+  async refreshData() {
+    const start = new Date(this.selectedDate); start.setHours(0,0,0,0);
+    const end = new Date(this.selectedDate); end.setHours(23,59,59,999);
+    const allTodos = await dbHelper.getTodosByDate(start.getTime(), end.getTime());
+
+    animateTo({ duration: 350, curve: Curve.EaseOut }, () => {
+      this.unfinishedList = allTodos.filter(t => t.isFinished === 0);
+      this.finishedList = allTodos.filter(t => t.isFinished === 1);
+      this.totalCount = allTodos.length;
+      this.finishedCount = this.finishedList.length;
+    });
+
+    if (this.isToday(this.selectedDate)) {
+      NotificationHelper.updateDailySummary(this.finishedCount, this.totalCount);
+    }
+  }
+
+  isToday(date: Date): boolean {
+    const today = new Date();
+    return date.getDate() === today.getDate() &&
+      date.getMonth() === today.getMonth() &&
+      date.getFullYear() === today.getFullYear();
+  }
+
+  openDatePicker() {
+    DatePickerDialog.show({
+      start: new Date("2020-1-1"), end: new Date("2100-12-31"), selected: this.selectedDate,
+      onAccept: (value: DatePickerResult) => {
+        if (value.year !== undefined && value.month !== undefined && value.day !== undefined) {
+          this.selectedDate = new Date(value.year, value.month, value.day);
+          this.refreshData();
+        }
+      }
+    });
+  }
+
+  openAddTodo() {
+    this.addController = new CustomDialogController({
+      builder: AddTodoDialog({
+        confirm: async (content) => {
+          const targetTime = new Date(this.selectedDate);
+          const now = new Date();
+          targetTime.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+          await dbHelper.addTodo(targetTime.getTime(), content);
+          this.refreshData();
+        }
+      }),
+      alignment: DialogAlignment.Bottom, customStyle: true, autoCancel: true
+    });
+    this.addController.open();
+  }
+
+  async toggleFinish(todo: TodoRecord) {
+    const isFinishing = todo.isFinished === 0;
+    const newStatus = isFinishing ? 1 : 0;
+    const updatedTodo: TodoRecord = { id: todo.id, content: todo.content, date: todo.date, isFinished: newStatus };
+
+    animateTo({ duration: 350, curve: Curve.FastOutSlowIn }, () => {
+      if (isFinishing) {
+        this.unfinishedList = this.unfinishedList.filter(t => t.id !== todo.id);
+        this.finishedList.unshift(updatedTodo);
+        this.finishedCount++;
+      } else {
+        this.finishedList = this.finishedList.filter(t => t.id !== todo.id);
+        this.unfinishedList.unshift(updatedTodo);
+        this.finishedCount--;
+      }
+    });
+
+    await dbHelper.updateTodoStatus(todo.id, newStatus);
+    if (this.isToday(this.selectedDate)) {
+      NotificationHelper.updateDailySummary(this.finishedCount, this.totalCount);
+    }
+  }
+
+  async handleDelete(id: number) {
+    animateTo({ duration: 350, curve: Curve.EaseOut }, () => {
+      const inUnfinished = this.unfinishedList.some(t => t.id === id);
+      if (inUnfinished) {
+        this.unfinishedList = this.unfinishedList.filter(t => t.id !== id);
+      } else {
+        this.finishedList = this.finishedList.filter(t => t.id !== id);
+        this.finishedCount--;
+      }
+      this.totalCount--;
+    });
+
+    await dbHelper.deleteTodo(id);
+    if (this.isToday(this.selectedDate)) {
+      NotificationHelper.updateDailySummary(this.finishedCount, this.totalCount);
+    }
+  }
+
+  getDateTitle(): string { return `${this.selectedDate.getMonth() + 1}月${this.selectedDate.getDate()}日`; }
+
+  getProgressPercent(): number {
+    if (this.totalCount === 0) return 0;
+    return Math.round((this.finishedCount / this.totalCount) * 100);
+  }
+
+  build() {
+    Column() {
+      // 顶部标题栏
+      Row() {
+        Column() {
+          Row({ space: 4 }) {
+            Text("待办清单").fontSize(24).fontWeight(FontWeight.Bold)
+              .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            Button({ type: ButtonType.Circle }) {
+              SymbolGlyph($r('sys.symbol.calendar'))
+                .fontSize(20)
+                .fontColor([Theme.getStyle(this.themeName).accent as ResourceColor]) // 【动态主题】
+            }
+            .width(32).height(32)
+            .backgroundColor(this.isDarkMode ? Theme.colors.dark.inputBg : Theme.colors.light.inputBg)
+            .onClick(() => this.openDatePicker())
+          }.alignItems(VerticalAlign.Center)
+
+          Text(this.getDateTitle()).fontSize(14)
+            .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 4, left: 2 })
+        }.alignItems(HorizontalAlign.Start)
+
+        Blank()
+
+        // 进度环
+        Stack({ alignContent: Alignment.Center }) {
+          Progress({ value: this.finishedCount, total: this.totalCount, type: ProgressType.Ring })
+            .width(50).height(50)
+            .color(Theme.getStyle(this.themeName).accent as ResourceColor) // 【动态主题】
+            .backgroundColor(this.isDarkMode ? Theme.colors.dark.divider : Theme.colors.light.divider)
+            .style({ strokeWidth: 5 })
+            .animation({ duration: 500, curve: Curve.EaseOut })
+
+          Column({ space: 2 }) {
+            Text(`${this.getProgressPercent()}%`)
+              .fontSize(12).fontWeight(FontWeight.Bold)
+              .fontColor(this.isDarkMode ? Theme.colors.dark.textPrimary : Theme.colors.light.textPrimary)
+            Text(`${this.finishedCount}/${this.totalCount}`)
+              .fontSize(8)
+              .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+          }
+        }
+      }
+      .width('100%').padding({ left: 20, right: 20, top: 60, bottom: 15 })
+      .backgroundColor('transparent')
+
+      // 列表区域
+      if (this.totalCount === 0) {
+        Column() {
+          SymbolGlyph($r('sys.symbol.doc_plaintext')).fontSize(50)
+            .fontColor([this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary]);
+          Text('暂无待办，点右下角添加').fontSize(14)
+            .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary).margin({ top: 10 })
+        }.width('100%').layoutWeight(1).justifyContent(FlexAlign.Center)
+      } else {
+        List({ space: 10 }) {
+          if (this.unfinishedList.length > 0) {
+            ListItem() {
+              Text('进行中').fontSize(14).fontWeight(FontWeight.Bold)
+                .fontColor(Theme.getStyle(this.themeName).accent as ResourceColor) // 【动态主题】
+                .margin({ left: 5, bottom: 5 })
+            }
+            ForEach(this.unfinishedList, (item: TodoRecord) => {
+              TodoItemCard({
+                item: item,
+                onToggle: () => { this.toggleFinish(item) },
+                onDelete: () => { this.handleDelete(item.id) }
+              })
+            }, (item: TodoRecord) => item.id.toString())
+          }
+
+          if (this.finishedList.length > 0) {
+            ListItem() {
+              Text('已完成').fontSize(14).fontWeight(FontWeight.Bold)
+                .fontColor(this.isDarkMode ? Theme.colors.dark.textSecondary : Theme.colors.light.textSecondary)
+                .margin({ left: 5, top: 10, bottom: 5 })
+            }
+            ForEach(this.finishedList, (item: TodoRecord) => {
+              TodoItemCard({
+                item: item,
+                onToggle: () => { this.toggleFinish(item) },
+                onDelete: () => { this.handleDelete(item.id) }
+              })
+            }, (item: TodoRecord) => item.id.toString())
+          }
+
+          ListItem().height(100) // 底部垫高
+        }
+        .width('100%').layoutWeight(1).padding({ left: 15, right: 15 }).scrollBar(BarState.Off)
+      }
+
+      // 悬浮按钮
+      Row() {
+        Button() {
+          Row() {
+            SymbolGlyph($r('sys.symbol.list_checkmask')).fontSize(24).fontColor([Color.White]).margin({ right: 8 });
+            Text('新建待办').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Color.White)
+          }
+        }
+        .height(50).padding({ left: 20, right: 20 })
+        .backgroundColor(Theme.getStyle(this.themeName).accent as ResourceColor) // 【动态主题】
+        .borderRadius(25)
+        .shadow({ radius: 10, color: (Theme.getStyle(this.themeName).accent as string) + '40', offsetY: 5 }) // 【动态主题】
+        .onClick(() => this.openAddTodo())
+        .scale({ x: this.floatingButtonScale, y: this.floatingButtonScale })
+        .onTouch((event: TouchEvent) => {
+          animateTo({ duration: 100, curve: Curve.EaseOut }, () => {
+            if (event.type === TouchType.Down) {
+              this.floatingButtonScale = 0.95;
+            } else if (event.type === TouchType.Up) {
+              this.floatingButtonScale = 1.0;
+            }
+          });
+        })
+      }
+      .width('100%')
+      .position({ x: 0, y: '80%' })
+      .justifyContent(this.isRightHand ? FlexAlign.End : FlexAlign.Start)
+      .padding({ left: 20, right: 20 })
+      .translate({ x: this.offsetX })
+      .opacity(this.opacityValue)
+      .hitTestBehavior(HitTestMode.Transparent)
+
+    }
+    .width('100%').height('100%')
+    // 【修改】背景色逻辑统一
+    .linearGradient({ angle: 180, colors: this.isDarkMode ? Theme.colors.dark.bgGradient : Theme.colors.light.bgGradient })
+  }
+}
